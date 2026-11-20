@@ -100,12 +100,6 @@ void MCPEditorPlugin::_build_dock() {
 	root->add_theme_constant_override("separation", 6 * EDSCALE);
 	dock->add_child(root);
 
-	Label *intro = memnew(Label);
-	intro->set_text(String::utf8("Claude Code / Codex 等の外部AIエージェントから Mina Engine を直接操作するローカル MCP サーバーです。"));
-	intro->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
-	root->add_child(intro);
-	root->add_child(memnew(HSeparator));
-
 	// Status row.
 	HBoxContainer *status_row = memnew(HBoxContainer);
 	Label *status_prefix = memnew(Label);
