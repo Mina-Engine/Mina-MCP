@@ -22,7 +22,7 @@ It automatically starts alongside the game engine (in both **Project Manager** a
   - Binds exclusively to `127.0.0.1:6800` by default.
   - Validates `Host` and `Origin` headers to prevent unintended external exposure and DNS rebinding attacks.
 - **Built-in Management Dock (`MCP Server`)**
-  - Live status (`Running` / `Stopped` / `Error`), Start / Stop / Restart controls, port & auto-start settings, connected sessions list, one-click Claude Code / Codex config copy, and live tool execution feed.
+  - Live status (`Running` / `Stopped` / `Error`), Start / Stop / Restart controls, port & auto-start settings, connected sessions list, one-click endpoint URL & generic MCP JSON config copy, and live tool execution feed.
 - **Extensible Architecture**
   - C++ modules register tools via `MinaMCPServer::add_provider_callback(...)` without modifying core MCP code.
   - GDScript / GDExtension plugins register tools dynamically via `MinaMCPServer.register_script_tool(...)` and `register_script_resource(...)`.
@@ -31,17 +31,29 @@ It automatically starts alongside the game engine (in both **Project Manager** a
 
 ## Quick Connect
 
-### Claude Code
+Connect any MCP-compatible client (Streamable HTTP: `http://127.0.0.1:6800/mcp` or Legacy SSE: `http://127.0.0.1:6800/sse`).
+
+### Standard MCP JSON Configuration
+
+```json
+{
+  "mcpServers": {
+    "mina-engine": {
+      "url": "http://127.0.0.1:6800/mcp"
+    }
+  }
+}
+```
+
+### Client Examples (CLI / TOML)
 
 ```bash
+# Example: Claude Code
 claude mcp add --transport http mina-engine http://127.0.0.1:6800/mcp
 ```
 
-### Codex
-
-Add to `~/.codex/config.toml`:
-
 ```toml
+# Example: Codex (~/.codex/config.toml)
 [mcp_servers.mina-engine]
 url = "http://127.0.0.1:6800/mcp"
 ```

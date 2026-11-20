@@ -22,26 +22,38 @@
   - デフォルトで `127.0.0.1:6800` のみにバインド。
   - `Host` / `Origin` ヘッダーを検証し、不用意な外部公開や DNS リバインディングを防止。
 - **エディタ内管理ドック（`MCP Server`）**
-  - 稼働状況、起動・停止・再起動、ポート番号・自動起動設定、接続中セッション一覧、Claude Code / Codex 接続設定のワンクリックコピー、リアルタイム実行ログを提供。
+  - 稼働状況、起動・停止・再起動、ポート番号・自動起動設定、接続中セッション一覧、エンドポイント URL・汎用 MCP 設定 JSON のワンクリックコピー、リアルタイム実行ログを提供。
 - **高い拡張性**
   - C++ モジュールは `MinaMCPServer::add_provider_callback(...)` でコアコードを変更せずツールを追加可能。
   - GDScript / GDExtension からは `MinaMCPServer.register_script_tool(...)` / `register_script_resource(...)` で動的登録可能。
 
 ---
 
-## 外部 AI エージェントからの接続方法
+## MCP クライアントからの接続方法
 
-### Claude Code
+任意の MCP 対応クライアントから `http://127.0.0.1:6800/mcp`（Streamable HTTP）または `http://127.0.0.1:6800/sse`（SSE）へ接続できます。
+
+### 汎用 MCP 設定（JSON）
+
+```json
+{
+  "mcpServers": {
+    "mina-engine": {
+      "url": "http://127.0.0.1:6800/mcp"
+    }
+  }
+}
+```
+
+### 接続例（CLI / TOML クライアント）
 
 ```bash
+# 例: Claude Code
 claude mcp add --transport http mina-engine http://127.0.0.1:6800/mcp
 ```
 
-### Codex
-
-`~/.codex/config.toml` に以下を追加します。
-
 ```toml
+# 例: Codex (~/.codex/config.toml)
 [mcp_servers.mina-engine]
 url = "http://127.0.0.1:6800/mcp"
 ```

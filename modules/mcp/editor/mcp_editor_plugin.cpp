@@ -131,26 +131,15 @@ void MCPEditorPlugin::_build_dock() {
 	endpoint_row->add_child(endpoint_field);
 	Button *copy_url_btn = memnew(Button);
 	copy_url_btn->set_text(String::utf8("URLコピー"));
+	copy_url_btn->set_tooltip_text(String::utf8("MCP エンドポイント URL をクリップボードにコピーします。"));
 	copy_url_btn->connect(SceneStringName(pressed), callable_mp(this, &MCPEditorPlugin::_on_copy_url));
 	endpoint_row->add_child(copy_url_btn);
+	Button *copy_config_btn = memnew(Button);
+	copy_config_btn->set_text(String::utf8("設定JSON"));
+	copy_config_btn->set_tooltip_text(String::utf8("汎用 MCP クライアント用の JSON 設定をクリップボードにコピーします。"));
+	copy_config_btn->connect(SceneStringName(pressed), callable_mp(this, &MCPEditorPlugin::_on_copy_mcp_config));
+	endpoint_row->add_child(copy_config_btn);
 	root->add_child(endpoint_row);
-
-	// Quick agent setup copy buttons.
-	HBoxContainer *setup_row = memnew(HBoxContainer);
-	Button *copy_claude_btn = memnew(Button);
-	copy_claude_btn->set_text("Claude Code");
-	copy_claude_btn->set_tooltip_text(String::utf8("Claude Code 用の登録コマンドをクリップボードにコピーします。"));
-	copy_claude_btn->set_h_size_flags(Control::SIZE_EXPAND_FILL);
-	copy_claude_btn->connect(SceneStringName(pressed), callable_mp(this, &MCPEditorPlugin::_on_copy_claude_cmd));
-	setup_row->add_child(copy_claude_btn);
-
-	Button *copy_codex_btn = memnew(Button);
-	copy_codex_btn->set_text("Codex TOML");
-	copy_codex_btn->set_tooltip_text(String::utf8("Codex (config.toml) 用の設定スニペットをクリップボードにコピーします。"));
-	copy_codex_btn->set_h_size_flags(Control::SIZE_EXPAND_FILL);
-	copy_codex_btn->connect(SceneStringName(pressed), callable_mp(this, &MCPEditorPlugin::_on_copy_codex_config));
-	setup_row->add_child(copy_codex_btn);
-	root->add_child(setup_row);
 
 	// Port & Auto-start controls.
 	HBoxContainer *config_row = memnew(HBoxContainer);
@@ -380,19 +369,11 @@ void MCPEditorPlugin::_on_copy_url() {
 	}
 }
 
-void MCPEditorPlugin::_on_copy_claude_cmd() {
+void MCPEditorPlugin::_on_copy_mcp_config() {
 	MinaMCPServer *server = MinaMCPServer::get_singleton();
 	if (server && DisplayServer::get_singleton()) {
-		String cmd = vformat("claude mcp add --transport http mina-engine %s", server->get_endpoint_url());
-		DisplayServer::get_singleton()->clipboard_set(cmd);
-	}
-}
-
-void MCPEditorPlugin::_on_copy_codex_config() {
-	MinaMCPServer *server = MinaMCPServer::get_singleton();
-	if (server && DisplayServer::get_singleton()) {
-		String toml = vformat("[mcp_servers.mina-engine]\nurl = \"%s\"\n", server->get_endpoint_url());
-		DisplayServer::get_singleton()->clipboard_set(toml);
+		String json = vformat("{\n  \"mcpServers\": {\n    \"mina-engine\": {\n      \"url\": \"%s\"\n    }\n  }\n}\n", server->get_endpoint_url());
+		DisplayServer::get_singleton()->clipboard_set(json);
 	}
 }
 

@@ -53,8 +53,7 @@ class MCPEditorPlugin : public EditorPlugin {
 	void _on_port_changed(double p_value);
 	void _on_auto_start_toggled(bool p_pressed);
 	void _on_copy_url();
-	void _on_copy_claude_cmd();
-	void _on_copy_codex_config();
+	void _on_copy_mcp_config();
 	void _on_clear_activity();
 	void _on_server_status_changed();
 	void _on_server_sessions_changed();
