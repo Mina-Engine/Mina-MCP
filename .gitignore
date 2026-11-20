@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.obj
+*.o
+*.lib
+*.a
+*.exe
+*.pdb
+.DS_Store
+Thumbs.db

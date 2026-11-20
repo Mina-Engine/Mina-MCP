@@ -1,0 +1,79 @@
+﻿diff --git a/editor/settings/editor_settings.cpp b/editor/settings/editor_settings.cpp
+index 8dc98d6..c697c98 100644
+--- a/editor/settings/editor_settings.cpp
++++ b/editor/settings/editor_settings.cpp
+@@ -1150,6 +1150,12 @@ void EditorSettings::_load_defaults(Ref<ConfigFile> p_extra_config) {
+ 	EDITOR_SETTING_BASIC(Variant::BOOL, PROPERTY_HINT_NONE, "network/language_server/use_thread", false, String());
+ 	EDITOR_SETTING(Variant::INT, PROPERTY_HINT_NONE, "network/language_server/poll_limit_usec", 100000, "");
+ 
++	/* Mina MCP Server */
++	EDITOR_SETTING_BASIC(Variant::BOOL, PROPERTY_HINT_NONE, "network/mcp_server/auto_start", true, String());
++	EDITOR_SETTING_BASIC(Variant::STRING, PROPERTY_HINT_NONE, "network/mcp_server/host", "127.0.0.1", String());
++	EDITOR_SETTING_BASIC(Variant::INT, PROPERTY_HINT_RANGE, "network/mcp_server/port", 6800, "1024,65535,1");
++	EDITOR_SETTING(Variant::BOOL, PROPERTY_HINT_NONE, "network/mcp_server/allow_remote", false, String());
++
+ 	/* Debugger/profiler */
+ 
+ 	EDITOR_SETTING_BASIC(Variant::BOOL, PROPERTY_HINT_NONE, "debugger/auto_switch_to_remote_scene_tree", false, "")
+diff --git a/main/main.cpp b/main/main.cpp
+index 2fc62fd..4b98dd8 100644
+--- a/main/main.cpp
++++ b/main/main.cpp
+@@ -156,6 +156,11 @@
+ #endif // TOOLS_ENABLED && !GDSCRIPT_NO_LSP
+ #endif // MODULE_GDSCRIPT_ENABLED
+ 
++#if defined(MODULE_MCP_ENABLED) && defined(TOOLS_ENABLED)
++#include "modules/mcp/editor/mcp_editor_plugin.h"
++#include "modules/mcp/mcp_server.h"
++#endif // MODULE_MCP_ENABLED && TOOLS_ENABLED
++
+ /* Static members */
+ 
+ // Singletons
+@@ -568,6 +573,10 @@ void Main::print_help(const char *p_binary) {
+ #if defined(MODULE_GDSCRIPT_ENABLED) && !defined(GDSCRIPT_NO_LSP)
+ 	print_help_option("--lsp-port <port>", "Use the specified port for the GDScript Language Server Protocol. Recommended port range [1024, 49151].\n", CLI_OPTION_AVAILABILITY_EDITOR);
+ #endif // MODULE_GDSCRIPT_ENABLED && !GDSCRIPT_NO_LSP
++#if defined(MODULE_MCP_ENABLED)
++	print_help_option("--mcp-port <port>", "Use the specified port for the built-in Mina MCP Server (default: 6800, localhost only).\n", CLI_OPTION_AVAILABILITY_EDITOR);
++	print_help_option("--no-mcp", "Disable automatic startup of the built-in Mina MCP Server.\n", CLI_OPTION_AVAILABILITY_EDITOR);
++#endif // MODULE_MCP_ENABLED
+ #endif
+ 	print_help_option("--quit", "Quit after the first iteration.\n");
+ 	print_help_option("--quit-after <int>", "Quit after the given number of iterations. Set to 0 to disable.\n");
+@@ -2048,6 +2057,23 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
+ 				OS::get_singleton()->print("Missing <port> argument for --dap-port <port>.\n");
+ 				goto error;
+ 			}
++#if defined(MODULE_MCP_ENABLED)
++		} else if (arg == "--mcp-port") {
++			if (N) {
++				int port_override = N->get().to_int();
++				if (port_override < 1 || port_override > 65535) {
++					OS::get_singleton()->print("<port> argument for --mcp-port <port> must be between 1 and 65535.\n");
++					goto error;
++				}
++				MinaMCPServer::port_override = port_override;
++				N = N->next();
++			} else {
++				OS::get_singleton()->print("Missing <port> argument for --mcp-port <port>.\n");
++				goto error;
++			}
++		} else if (arg == "--no-mcp") {
++			MinaMCPServer::disabled_override = true;
++#endif // MODULE_MCP_ENABLED
+ #endif // TOOLS_ENABLED
+ 		} else if (arg == "--wid") {
+ 			if (N) {
+@@ -4815,6 +4841,10 @@ int Main::start() {
+ 			ProjectManager *pmanager = memnew(ProjectManager);
+ 			ProgressDialog *progress_dialog = memnew(ProgressDialog);
+ 			pmanager->add_child(progress_dialog);
++#ifdef MODULE_MCP_ENABLED
++			MCPProjectManagerHost *mcp_host = memnew(MCPProjectManagerHost);
++			pmanager->add_child(mcp_host);
++#endif
+ 
+ 			sml->get_root()->add_child(pmanager);
+ 			OS::get_singleton()->benchmark_end_measure("Startup", "Project Manager");
