@@ -18,6 +18,7 @@ void mcp_register_assets_scripts_tools(MinaMCPServer *p_server);
 void mcp_register_animation_lighting_tools(MinaMCPServer *p_server);
 void mcp_register_runtime_export_tools(MinaMCPServer *p_server);
 void mcp_register_requested_tools(MinaMCPServer *p_server);
+void mcp_register_asset_download_tools(MinaMCPServer *p_server);
 void mcp_requested_tools_process();
 
 inline void mcp_register_builtin_tools(MinaMCPServer *p_server) {
@@ -27,4 +28,5 @@ inline void mcp_register_builtin_tools(MinaMCPServer *p_server) {
 	mcp_register_animation_lighting_tools(p_server);
 	mcp_register_runtime_export_tools(p_server);
 	mcp_register_requested_tools(p_server);
+	mcp_register_asset_download_tools(p_server);
 }
