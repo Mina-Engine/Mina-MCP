@@ -48,6 +48,7 @@ bool _host_allowed(const String &p_host) {
 		"struffelproductions.com", // ambientCG download CDN
 		"lotsofsounds.com", // Lots of Sounds CC0 SFX API & CDN
 		"wikimedia.org", // Wikimedia Commons API & upload CDN
+		"raw.githubusercontent.com", // Curated open-source animated GLB character catalog only
 	};
 	for (const char *a : allowed) {
 		String s = a;
@@ -517,9 +518,106 @@ Dictionary _search_wikimedia(const String &p_query, int p_limit, bool p_cc0_only
 	return mcp::make_ok(out);
 }
 
+struct CuratedAnimatedAsset {
+	const char *id;
+	const char *name;
+	const char *tags;
+	const char *animations;
+	const char *license;
+	const char *filename;
+	const char *url;
+	const char *page_url;
+};
+
+static const CuratedAnimatedAsset CURATED_ANIMATED_CATALOG[] = {
+	{
+		"soldier",
+		"Tactical Soldier (Rigged + Animations)",
+		"soldier military human character fps enemy walk run idle rigged mixamo",
+		"Idle,Run,TPose,Walk",
+		"MIT (Three.js / Mixamo sample)",
+		"Soldier.glb",
+		"https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/models/gltf/Soldier.glb",
+		"https://github.com/mrdoob/three.js/blob/dev/examples/models/gltf/Soldier.glb",
+	},
+	{
+		"robot_expressive",
+		"Expressive Robot (14 Animations)",
+		"robot character scifi walk run jump death punch wave dance idle rigged",
+		"Dance,Death,Idle,Jump,No,Punch,Running,Sitting,Standing,ThumbsUp,Walking,WalkJump,Wave,Yes",
+		"CC0-1.0",
+		"RobotExpressive.glb",
+		"https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/models/gltf/RobotExpressive/RobotExpressive.glb",
+		"https://github.com/mrdoob/three.js/tree/dev/examples/models/gltf/RobotExpressive",
+	},
+	{
+		"xbot",
+		"Humanoid Xbot (Rigged + Locomotion)",
+		"humanoid mannequin xbot character walk run idle sneak rigged mixamo",
+		"idle,walk,run,sneak_pose,agree,headShake,sad_pose",
+		"MIT (Three.js / Mixamo sample)",
+		"Xbot.glb",
+		"https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/models/gltf/Xbot.glb",
+		"https://github.com/mrdoob/three.js/blob/dev/examples/models/gltf/Xbot.glb",
+	},
+	{
+		"cesium_man",
+		"Cesium Man (Rigged + Walk Cycle)",
+		"human man character walk cycle rigged khronos",
+		"Walk",
+		"CC-BY-4.0 (Khronos glTF Sample Assets)",
+		"CesiumMan.glb",
+		"https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/CesiumMan/glTF-Binary/CesiumMan.glb",
+		"https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/CesiumMan",
+	},
+	{
+		"fox",
+		"Low-Poly Fox (Rigged + Survey/Walk/Run)",
+		"fox animal creature walk run survey rigged khronos",
+		"Survey,Walk,Run",
+		"CC0-1.0 (Khronos glTF Sample Assets)",
+		"Fox.glb",
+		"https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Fox/glTF-Binary/Fox.glb",
+		"https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/Fox",
+	},
+};
+
+Dictionary _search_animated_characters(const String &p_query, int p_limit) {
+	String q = p_query.to_lower();
+	Array results;
+	for (const CuratedAnimatedAsset &item : CURATED_ANIMATED_CATALOG) {
+		if (!_matches(q, item.id, item.name, String(item.tags) + " " + String(item.animations))) {
+			continue;
+		}
+		if (results.size() >= p_limit) {
+			break;
+		}
+		Dictionary r;
+		r["source"] = "animated_characters";
+		r["asset_id"] = item.id;
+		r["name"] = item.name;
+		r["type"] = "animation";
+		r["format"] = "glb";
+		Array anims;
+		Vector<String> parts = String(item.animations).split(",", false);
+		for (const String &a : parts) {
+			anims.push_back(a);
+		}
+		r["animations"] = anims;
+		r["license"] = item.license;
+		r["page_url"] = item.page_url;
+		results.push_back(r);
+	}
+	Dictionary out;
+	out["source"] = "animated_characters";
+	out["total_matches"] = results.size();
+	out["results"] = results;
+	return mcp::make_ok(out);
+}
+
 Dictionary _tool_asset_search_free(const Dictionary &p_args) {
 	String type = String(p_args.get("type", "any")).to_lower();
-	String default_source = (type == "audio") ? "lotsofsounds" : "polyhaven";
+	String default_source = (type == "audio") ? "lotsofsounds" : ((type == "animation") ? "animated_characters" : "polyhaven");
 	String source = String(p_args.get("source", default_source)).to_lower();
 	String query = String(p_args.get("query", "")).strip_edges();
 	int limit = CLAMP(int(p_args.get("limit", 20)), 1, 100);
@@ -537,6 +635,9 @@ Dictionary _tool_asset_search_free(const Dictionary &p_args) {
 	if (source == "wikimedia") {
 		return _search_wikimedia(query, limit, cc0_only);
 	}
+	if (source == "animated_characters") {
+		return _search_animated_characters(query, limit);
+	}
 	if (source == "all") {
 		Array merged;
 		Dictionary errors;
@@ -550,10 +651,13 @@ Dictionary _tool_asset_search_free(const Dictionary &p_args) {
 		if (type == "audio") {
 			collect("lotsofsounds", _search_lotsofsounds(query, limit));
 			collect("wikimedia", _search_wikimedia(query, limit, cc0_only));
+		} else if (type == "animation") {
+			collect("animated_characters", _search_animated_characters(query, limit));
 		} else {
 			collect("polyhaven", _search_polyhaven(query, type, limit));
 			collect("ambientcg", _search_ambientcg(query, type, limit));
 			if (type == "any") {
+				collect("animated_characters", _search_animated_characters(query, MIN(limit, 10)));
 				collect("lotsofsounds", _search_lotsofsounds(query, MIN(limit, 10)));
 			}
 		}
@@ -564,7 +668,7 @@ Dictionary _tool_asset_search_free(const Dictionary &p_args) {
 		}
 		return mcp::make_ok(out);
 	}
-	return mcp::make_error("Parameter 'source' must be 'polyhaven', 'ambientcg', 'lotsofsounds', 'wikimedia', or 'all'.", "invalid_argument");
+	return mcp::make_error("Parameter 'source' must be 'polyhaven', 'ambientcg', 'lotsofsounds', 'wikimedia', 'animated_characters', or 'all'.", "invalid_argument");
 }
 
 // ---------------------------------------------------------------------------
@@ -1118,6 +1222,49 @@ Dictionary _download_wikimedia(const Dictionary &p_args, const String &p_id) {
 	return mcp::make_ok(out);
 }
 
+Dictionary _download_animated_characters(const Dictionary &p_args, const String &p_id) {
+	int64_t max_total = int64_t(CLAMP(double(p_args.get("max_total_mb", 200.0)), 1.0, double(HARD_MAX_TOTAL_BYTES / (1024 * 1024)))) * 1024 * 1024;
+	const CuratedAnimatedAsset *found = nullptr;
+	for (const CuratedAnimatedAsset &item : CURATED_ANIMATED_CATALOG) {
+		if (String(item.id).to_lower() == p_id.to_lower()) {
+			found = &item;
+			break;
+		}
+	}
+	if (!found) {
+		return mcp::make_error("Animated character asset_id not found: " + p_id + ". Run asset_search_free(type='animation') to list available ids.", "not_found");
+	}
+	String derr;
+	String dir = _dest_dir(p_args, found->id, derr);
+	if (dir.is_empty()) {
+		return mcp::make_error(derr, "invalid_argument");
+	}
+
+	PackedByteArray glb_bytes;
+	String error;
+	if (!_http_get(found->url, glb_bytes, error, max_total)) {
+		return mcp::make_error(error, "network_error");
+	}
+	String out_path = dir + "/" + String(found->filename);
+	if (!_write_file(out_path, glb_bytes, error)) {
+		return mcp::make_error(error, "write_failed");
+	}
+
+	Array written;
+	written.push_back(out_path);
+	Array anims;
+	for (const String &a : String(found->animations).split(",", false)) {
+		anims.push_back(a);
+	}
+	Dictionary out;
+	out["asset_type"] = "animation";
+	out["format"] = "glb";
+	out["animations"] = anims;
+	out["total_bytes"] = int64_t(glb_bytes.size());
+	_finish_download(out, dir, "Open Animated Characters", found->id, found->page_url, written, found->license);
+	return mcp::make_ok(out);
+}
+
 Dictionary _tool_asset_download_free(const Dictionary &p_args) {
 	if (!EditorFileSystem::get_singleton()) {
 		return mcp::make_error("Editor is required to download assets into the project.", "editor_required");
@@ -1139,7 +1286,10 @@ Dictionary _tool_asset_download_free(const Dictionary &p_args) {
 	if (source == "wikimedia") {
 		return _download_wikimedia(p_args, id);
 	}
-	return mcp::make_error("Parameter 'source' must be 'polyhaven', 'ambientcg', 'lotsofsounds', or 'wikimedia'.", "invalid_argument");
+	if (source == "animated_characters") {
+		return _download_animated_characters(p_args, id);
+	}
+	return mcp::make_error("Parameter 'source' must be 'polyhaven', 'ambientcg', 'lotsofsounds', 'wikimedia', or 'animated_characters'.", "invalid_argument");
 }
 
 Dictionary _tool_asset_create_pbr_material(const Dictionary &p_args) {
@@ -1234,16 +1384,18 @@ void mcp_register_asset_download_tools(MinaMCPServer *p_server) {
 		sources.push_back("ambientcg");
 		sources.push_back("lotsofsounds");
 		sources.push_back("wikimedia");
+		sources.push_back("animated_characters");
 		sources.push_back("all");
-		props["source"] = schema_string("Asset library (default: polyhaven, or lotsofsounds when type='audio').", sources);
-		props["query"] = schema_string("Search text matched against name, tags and categories (e.g. 'wood', 'rock', 'footsteps', 'door creak').");
+		props["source"] = schema_string("Asset library (default: polyhaven, lotsofsounds for audio, animated_characters for animation).", sources);
+		props["query"] = schema_string("Search text matched against name, tags and categories (e.g. 'wood', 'soldier', 'footsteps').");
 		Array types;
 		types.push_back("any");
 		types.push_back("texture");
 		types.push_back("model");
 		types.push_back("hdri");
 		types.push_back("audio");
-		props["type"] = schema_string("Asset type filter (default: any). Use 'audio' for sound effects & ambience.", types);
+		types.push_back("animation");
+		props["type"] = schema_string("Asset type filter (default: any). Use 'audio' for SFX or 'animation' for rigged/animated 3D characters.", types);
 		props["cc0_only"] = schema_bool("wikimedia only: restrict results to CC0 / Public Domain audio (default: false).");
 		props["limit"] = schema_int("Maximum results (default: 20, max: 100).");
 
@@ -1263,6 +1415,7 @@ void mcp_register_asset_download_tools(MinaMCPServer *p_server) {
 		sources.push_back("ambientcg");
 		sources.push_back("lotsofsounds");
 		sources.push_back("wikimedia");
+		sources.push_back("animated_characters");
 		props["source"] = schema_string("Asset library (default: polyhaven).", sources);
 		props["asset_id"] = schema_string("Asset id from asset_search_free.");
 		props["resolution"] = schema_string("Resolution such as '1k', '2k', '4k' (default: 1k, textures/models/HDRIs only).");

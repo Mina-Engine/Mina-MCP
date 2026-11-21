@@ -18,8 +18,12 @@
 #include "editor/editor_undo_redo_manager.h"
 #include "scene/2d/light_2d.h"
 #include "scene/3d/light_3d.h"
+#include "scene/3d/skeleton_3d.h"
 #include "scene/3d/world_environment.h"
+#include "scene/animation/animation_blend_tree.h"
+#include "scene/animation/animation_node_state_machine.h"
 #include "scene/animation/animation_player.h"
+#include "scene/animation/animation_tree.h"
 #include "scene/resources/animation.h"
 #include "scene/resources/animation_library.h"
 #include "scene/resources/environment.h"
@@ -807,6 +811,300 @@ Dictionary _tool_class_get_info(const Dictionary &p_args) {
 	return mcp::make_ok(out);
 }
 
+Skeleton3D *_find_skeleton_recursive(Node *p_node) {
+	if (!p_node) {
+		return nullptr;
+	}
+	if (Skeleton3D *sk = Object::cast_to<Skeleton3D>(p_node)) {
+		return sk;
+	}
+	for (int i = 0; i < p_node->get_child_count(); i++) {
+		if (Skeleton3D *found = _find_skeleton_recursive(p_node->get_child(i))) {
+			return found;
+		}
+	}
+	return nullptr;
+}
+
+Dictionary _tool_skeleton_inspect(const Dictionary &p_args) {
+	String node_path = String(p_args.get("node_path", "."));
+	bool include_poses = bool(p_args.get("include_poses", false));
+	String err;
+	Node *n = _find_scene_node(node_path, err);
+	if (!n) {
+		return mcp::make_error(err, "node_not_found");
+	}
+	Skeleton3D *sk = _find_skeleton_recursive(n);
+	if (!sk) {
+		return mcp::make_error(vformat("No Skeleton3D found at or under '%s'.", node_path), "not_found");
+	}
+	Node *root = EditorInterface::get_singleton()->get_edited_scene_root();
+	Array bones;
+	int count = sk->get_bone_count();
+	for (int i = 0; i < count; i++) {
+		Dictionary b;
+		b["index"] = i;
+		b["name"] = sk->get_bone_name(i);
+		int parent = sk->get_bone_parent(i);
+		b["parent"] = parent;
+		b["parent_name"] = (parent >= 0 && parent < count) ? sk->get_bone_name(parent) : String();
+		if (include_poses) {
+			Transform3D rest = sk->get_bone_rest(i);
+			b["rest_position"] = mcp::variant_to_json(rest.origin);
+			b["pose_position"] = mcp::variant_to_json(sk->get_bone_pose_position(i));
+			b["pose_rotation_deg"] = mcp::variant_to_json(sk->get_bone_pose_rotation(i).get_euler() * (180.0f / Math::PI));
+		}
+		bones.push_back(b);
+	}
+	Dictionary out;
+	out["skeleton_path"] = String(root->get_path_to(sk));
+	out["bone_count"] = count;
+	out["bones"] = bones;
+	return mcp::make_ok(out);
+}
+
+Dictionary _tool_animation_create_procedural(const Dictionary &p_args) {
+	String player_path = String(p_args.get("player_path", ""));
+	String anim_name = String(p_args.get("animation", "")).strip_edges();
+	String lib_name = String(p_args.get("library", "")).strip_edges();
+	double length = MAX(0.01, double(p_args.get("length", 1.0)));
+	double step = MAX(0.001, double(p_args.get("step", 0.05)));
+	String loop_str = String(p_args.get("loop_mode", "none")).to_lower();
+	bool autoplay = bool(p_args.get("autoplay", false));
+	Array tracks = p_args.get("tracks", Array());
+
+	if (anim_name.is_empty()) {
+		return mcp::make_error("Parameter 'animation' is required.", "invalid_argument");
+	}
+	String err;
+	AnimationPlayer *ap = _resolve_anim_player(player_path, err);
+	if (!ap) {
+		return mcp::make_error(err, "node_not_found");
+	}
+
+	Ref<AnimationLibrary> lib = _get_or_create_library(ap, lib_name);
+	Ref<Animation> anim;
+	anim.instantiate();
+	anim->set_length(float(length));
+	anim->set_step(float(step));
+	if (loop_str == "linear") {
+		anim->set_loop_mode(Animation::LOOP_LINEAR);
+	} else if (loop_str == "pingpong") {
+		anim->set_loop_mode(Animation::LOOP_PINGPONG);
+	} else {
+		anim->set_loop_mode(Animation::LOOP_NONE);
+	}
+
+	int total_keys = 0;
+	for (int i = 0; i < tracks.size(); i++) {
+		if (tracks[i].get_type() != Variant::DICTIONARY) {
+			continue;
+		}
+		Dictionary td = tracks[i];
+		String track_path = String(td.get("path", "")).strip_edges();
+		if (track_path.is_empty()) {
+			continue;
+		}
+		bool ok_type = true;
+		Animation::TrackType tt = _parse_track_type(String(td.get("type", "value")), ok_type);
+		if (!ok_type) {
+			tt = Animation::TYPE_VALUE;
+		}
+		int idx = anim->add_track(tt);
+		anim->track_set_path(idx, NodePath(track_path));
+
+		String interp = String(td.get("interpolation", "linear")).to_lower();
+		if (interp == "nearest") {
+			anim->track_set_interpolation_type(idx, Animation::INTERPOLATION_NEAREST);
+		} else if (interp == "cubic") {
+			anim->track_set_interpolation_type(idx, Animation::INTERPOLATION_CUBIC);
+		} else {
+			anim->track_set_interpolation_type(idx, Animation::INTERPOLATION_LINEAR);
+		}
+
+		Array keys = td.get("keys", Array());
+		for (int k = 0; k < keys.size(); k++) {
+			if (keys[k].get_type() != Variant::DICTIONARY) {
+				continue;
+			}
+			Dictionary kd = keys[k];
+			double t_sec = double(kd.get("time", 0.0));
+			float trans = float(kd.get("transition", 1.0));
+			Variant raw_val = kd.get("value", Variant());
+			if (tt == Animation::TYPE_POSITION_3D) {
+				Vector3 v;
+				mcp::parse_vector3(raw_val, v);
+				anim->position_track_insert_key(idx, t_sec, v);
+			} else if (tt == Animation::TYPE_SCALE_3D) {
+				Vector3 v(1, 1, 1);
+				mcp::parse_vector3(raw_val, v);
+				anim->scale_track_insert_key(idx, t_sec, v);
+			} else if (tt == Animation::TYPE_ROTATION_3D) {
+				Quaternion q;
+				if (raw_val.get_type() == Variant::ARRAY && Array(raw_val).size() == 3) {
+					Vector3 deg;
+					mcp::parse_vector3(raw_val, deg);
+					q = Quaternion::from_euler(Vector3(Math::deg_to_rad(deg.x), Math::deg_to_rad(deg.y), Math::deg_to_rad(deg.z)));
+				} else {
+					q = mcp::json_to_variant(raw_val, Variant::QUATERNION);
+				}
+				anim->rotation_track_insert_key(idx, t_sec, q);
+			} else {
+				Variant val = raw_val;
+				if (raw_val.get_type() == Variant::ARRAY) {
+					Array a = raw_val;
+					if (a.size() == 3) {
+						Vector3 v;
+						if (mcp::parse_vector3(raw_val, v)) {
+							val = v;
+						}
+					} else if (a.size() == 2) {
+						Vector2 v;
+						if (mcp::parse_vector2(raw_val, v)) {
+							val = v;
+						}
+					}
+				}
+				anim->track_insert_key(idx, t_sec, val, trans);
+			}
+			total_keys++;
+		}
+	}
+
+	StringName sn(anim_name);
+	if (lib->has_animation(sn)) {
+		lib->remove_animation(sn);
+	}
+	lib->add_animation(sn, anim);
+	if (autoplay) {
+		String full_name = lib_name.is_empty() ? anim_name : (lib_name + "/" + anim_name);
+		ap->set_autoplay(full_name);
+	}
+	EditorInterface::get_singleton()->mark_scene_as_unsaved();
+
+	Dictionary out;
+	out["player_path"] = player_path;
+	out["animation"] = anim_name;
+	out["library"] = lib_name;
+	out["length"] = length;
+	out["track_count"] = anim->get_track_count();
+	out["key_count"] = total_keys;
+	return mcp::make_ok(out);
+}
+
+Dictionary _tool_animation_setup_state_machine(const Dictionary &p_args) {
+	String parent_path = String(p_args.get("parent_path", "."));
+	String tree_name = String(p_args.get("tree_name", "AnimationTree")).strip_edges();
+	String player_path = String(p_args.get("anim_player_path", "")).strip_edges();
+	Array states = p_args.get("states", Array());
+	Array transitions = p_args.get("transitions", Array());
+	String start_state = String(p_args.get("start_state", "")).strip_edges();
+	bool activate = bool(p_args.get("active", true));
+
+	String err;
+	Node *parent = _find_scene_node(parent_path, err);
+	if (!parent) {
+		return mcp::make_error(err, "node_not_found");
+	}
+	AnimationPlayer *ap = _resolve_anim_player(player_path, err);
+	if (!ap) {
+		return mcp::make_error(err, "node_not_found");
+	}
+
+	Node *root = EditorInterface::get_singleton()->get_edited_scene_root();
+	AnimationTree *at = Object::cast_to<AnimationTree>(parent->get_node_or_null(NodePath(tree_name)));
+	if (!at) {
+		at = memnew(AnimationTree);
+		at->set_name(tree_name);
+		parent->add_child(at);
+		at->set_owner(root);
+	}
+
+	Ref<AnimationNodeStateMachine> sm;
+	sm.instantiate();
+
+	int added_states = 0;
+	for (int i = 0; i < states.size(); i++) {
+		String sname;
+		String aname;
+		if (states[i].get_type() == Variant::STRING) {
+			sname = String(states[i]);
+			aname = sname;
+		} else if (states[i].get_type() == Variant::DICTIONARY) {
+			Dictionary sd = states[i];
+			sname = String(sd.get("name", ""));
+			aname = String(sd.get("animation", sname));
+		}
+		if (sname.is_empty()) {
+			continue;
+		}
+		Ref<AnimationNodeAnimation> node_anim;
+		node_anim.instantiate();
+		node_anim->set_animation(StringName(aname));
+		Vector2 graph_pos(220.0f + float(i % 4) * 200.0f, 100.0f + float(i / 4) * 140.0f);
+		sm->add_node(StringName(sname), node_anim, graph_pos);
+		added_states++;
+	}
+
+	if (!start_state.is_empty() && sm->has_node(StringName(start_state))) {
+		Ref<AnimationNodeStateMachineTransition> start_tr;
+		start_tr.instantiate();
+		start_tr->set_advance_mode(AnimationNodeStateMachineTransition::ADVANCE_MODE_AUTO);
+		sm->add_transition(StringName("Start"), StringName(start_state), start_tr);
+	}
+
+	int added_transitions = 0;
+	for (int i = 0; i < transitions.size(); i++) {
+		if (transitions[i].get_type() != Variant::DICTIONARY) {
+			continue;
+		}
+		Dictionary td = transitions[i];
+		String from_s = String(td.get("from", "")).strip_edges();
+		String to_s = String(td.get("to", "")).strip_edges();
+		if (from_s.is_empty() || to_s.is_empty()) {
+			continue;
+		}
+		if (!sm->has_node(StringName(from_s)) || !sm->has_node(StringName(to_s))) {
+			continue;
+		}
+		Ref<AnimationNodeStateMachineTransition> tr;
+		tr.instantiate();
+		tr->set_xfade_time(float(td.get("xfade_time", 0.15)));
+		String smode = String(td.get("switch_mode", "immediate")).to_lower();
+		if (smode == "at_end") {
+			tr->set_switch_mode(AnimationNodeStateMachineTransition::SWITCH_MODE_AT_END);
+		} else if (smode == "sync") {
+			tr->set_switch_mode(AnimationNodeStateMachineTransition::SWITCH_MODE_SYNC);
+		} else {
+			tr->set_switch_mode(AnimationNodeStateMachineTransition::SWITCH_MODE_IMMEDIATE);
+		}
+		String amode = String(td.get("advance_mode", "enabled")).to_lower();
+		if (amode == "auto") {
+			tr->set_advance_mode(AnimationNodeStateMachineTransition::ADVANCE_MODE_AUTO);
+		} else if (amode == "disabled") {
+			tr->set_advance_mode(AnimationNodeStateMachineTransition::ADVANCE_MODE_DISABLED);
+		} else {
+			tr->set_advance_mode(AnimationNodeStateMachineTransition::ADVANCE_MODE_ENABLED);
+		}
+		sm->add_transition(StringName(from_s), StringName(to_s), tr);
+		added_transitions++;
+	}
+
+	at->set_root_animation_node(sm);
+	at->set_animation_player(at->get_path_to(ap));
+	at->set_active(activate);
+	EditorInterface::get_singleton()->mark_scene_as_unsaved();
+
+	Dictionary out;
+	out["tree_path"] = String(root->get_path_to(at));
+	out["anim_player_path"] = String(at->get_animation_player());
+	out["states_count"] = added_states;
+	out["transitions_count"] = added_transitions;
+	out["start_state"] = start_state;
+	out["active"] = activate;
+	return mcp::make_ok(out);
+}
+
 } // namespace
 
 void mcp_register_animation_lighting_tools(MinaMCPServer *p_server) {
@@ -1060,6 +1358,66 @@ void mcp_register_animation_lighting_tools(MinaMCPServer *p_server) {
 		t.category = "introspection";
 		t.input_schema = make_tool_schema(props, req);
 		t.handler = _tool_class_get_info;
+		p_server->register_tool(t);
+	}
+	{
+		Dictionary props;
+		props["node_path"] = schema_string("Node path to a Skeleton3D or any parent node containing one (default: '.').");
+		props["include_poses"] = schema_bool("Include bone rest/pose transforms in output (default: false).");
+
+		MinaMCPServer::ToolDefinition t;
+		t.name = "skeleton_inspect";
+		t.title = "Inspect Skeleton3D Bones";
+		t.description = "Inspect a Skeleton3D node (or auto-locate one under a rigged character node) and list its bone hierarchy and optional rest/pose transforms.";
+		t.category = "animation";
+		t.input_schema = make_tool_schema(props);
+		t.handler = _tool_skeleton_inspect;
+		p_server->register_tool(t);
+	}
+	{
+		Dictionary props;
+		props["player_path"] = schema_string("Node path to the AnimationPlayer.");
+		props["animation"] = schema_string("Animation name to create or overwrite (e.g. 'reload', 'walk', 'recoil').");
+		props["library"] = schema_string("AnimationLibrary name (default: '').");
+		props["length"] = schema_number("Duration in seconds (default: 1.0).");
+		props["step"] = schema_number("Snap step in seconds (default: 0.05).");
+		props["loop_mode"] = schema_string("Loop mode: 'none', 'linear', or 'pingpong' (default: 'none').");
+		props["autoplay"] = schema_bool("Set as autoplay on the AnimationPlayer (default: false).");
+		props["tracks"] = schema_array("Array of tracks: [{path, type ('value'|'position_3d'|'rotation_3d'|'scale_3d'), interpolation ('linear'|'cubic'|'nearest'), keys: [{time, value, transition}]}].", schema_object("Track"));
+		Array req;
+		req.push_back("player_path");
+		req.push_back("animation");
+		req.push_back("tracks");
+
+		MinaMCPServer::ToolDefinition t;
+		t.name = "animation_create_procedural";
+		t.title = "Create Procedural Animation";
+		t.description = "Create a complete multi-track, multi-keyframe Animation on an AnimationPlayer in a single call (ideal for weapon reload/recoil, doors, and procedural character motions).";
+		t.category = "animation";
+		t.input_schema = make_tool_schema(props, req);
+		t.handler = _tool_animation_create_procedural;
+		p_server->register_tool(t);
+	}
+	{
+		Dictionary props;
+		props["parent_path"] = schema_string("Parent node path where AnimationTree will be created or updated (default: '.').");
+		props["tree_name"] = schema_string("Name of the AnimationTree node (default: 'AnimationTree').");
+		props["anim_player_path"] = schema_string("Node path to the target AnimationPlayer.");
+		props["states"] = schema_array("Array of state names (strings) or {name, animation} objects.");
+		props["transitions"] = schema_array("Array of {from, to, xfade_time, switch_mode ('immediate'|'at_end'|'sync'), advance_mode ('enabled'|'auto'|'disabled')} transitions.");
+		props["start_state"] = schema_string("Initial state connected automatically from Start.");
+		props["active"] = schema_bool("Activate the AnimationTree immediately (default: true).");
+		Array req;
+		req.push_back("anim_player_path");
+		req.push_back("states");
+
+		MinaMCPServer::ToolDefinition t;
+		t.name = "animation_setup_state_machine";
+		t.title = "Setup AnimationTree State Machine";
+		t.description = "Create and wire an AnimationTree with an AnimationNodeStateMachine, states, crossfade transitions, and AnimationPlayer binding in one call.";
+		t.category = "animation";
+		t.input_schema = make_tool_schema(props, req);
+		t.handler = _tool_animation_setup_state_machine;
 		p_server->register_tool(t);
 	}
 }
