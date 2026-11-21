@@ -108,6 +108,21 @@ String _extract_query_param(const String &p_query, const String &p_key) {
 	return String();
 }
 
+HashSet<String> _parse_categories_csv(const String &p_csv) {
+	HashSet<String> out;
+	if (p_csv.strip_edges().is_empty()) {
+		return out;
+	}
+	PackedStringArray parts = p_csv.split(",", false);
+	for (int i = 0; i < parts.size(); i++) {
+		String c = parts[i].strip_edges().to_lower();
+		if (!c.is_empty() && c != "*" && c != "all") {
+			out.insert(c);
+		}
+	}
+	return out;
+}
+
 } // namespace
 
 MinaMCPServer *MinaMCPServer::singleton = nullptr;
@@ -612,6 +627,7 @@ bool MinaMCPServer::_try_process_http_request(HTTPConnection &p_conn) {
 		info.transport = "sse";
 		info.connected_msec = OS::get_singleton() ? OS::get_singleton()->get_ticks_msec() : 0;
 		info.last_activity_msec = info.connected_msec;
+		info.category_filter = _parse_categories_csv(_extract_query_param(query, "categories"));
 		sessions[session_id] = info;
 		_notify_sessions_changed();
 
@@ -629,6 +645,7 @@ bool MinaMCPServer::_try_process_http_request(HTTPConnection &p_conn) {
 		String session_id = is_legacy_sse_post
 				? _extract_query_param(query, "sessionId")
 				: (headers.has("mcp-session-id") ? headers["mcp-session-id"] : String());
+		HashSet<String> query_categories = _parse_categories_csv(_extract_query_param(query, "categories"));
 
 		String body_str = body_bytes.is_empty() ? String() : String::utf8((const char *)body_bytes.ptr(), body_bytes.size());
 		Ref<JSON> parser;
@@ -650,7 +667,7 @@ bool MinaMCPServer::_try_process_http_request(HTTPConnection &p_conn) {
 			Array batch_responses;
 			for (int i = 0; i < batch.size(); i++) {
 				bool item_has_resp = false;
-				Variant item_resp = _handle_jsonrpc_message(batch[i], new_session_id, new_session_id, item_has_resp);
+				Variant item_resp = _handle_jsonrpc_message(batch[i], new_session_id, query_categories, new_session_id, item_has_resp);
 				if (item_has_resp) {
 					batch_responses.push_back(item_resp);
 				}
@@ -660,7 +677,7 @@ bool MinaMCPServer::_try_process_http_request(HTTPConnection &p_conn) {
 				has_response = true;
 			}
 		} else if (payload.get_type() == Variant::DICTIONARY) {
-			response_payload = _handle_jsonrpc_message(payload, session_id, new_session_id, has_response);
+			response_payload = _handle_jsonrpc_message(payload, session_id, query_categories, new_session_id, has_response);
 		} else {
 			response_payload = _make_jsonrpc_error(Variant(), -32600, "Invalid Request: expected JSON-RPC object or array.");
 			has_response = true;
@@ -784,7 +801,7 @@ Dictionary MinaMCPServer::_make_jsonrpc_error(const Variant &p_id, int p_code, c
 	return d;
 }
 
-Variant MinaMCPServer::_handle_jsonrpc_message(const Variant &p_msg, const String &p_session_id, String &r_new_session_id, bool &r_has_response) {
+Variant MinaMCPServer::_handle_jsonrpc_message(const Variant &p_msg, const String &p_session_id, const HashSet<String> &p_query_categories, String &r_new_session_id, bool &r_has_response) {
 	r_has_response = false;
 	if (p_msg.get_type() != Variant::DICTIONARY) {
 		r_has_response = true;
@@ -825,14 +842,14 @@ Variant MinaMCPServer::_handle_jsonrpc_message(const Variant &p_msg, const Strin
 	r_has_response = true;
 
 	if (method == "initialize") {
-		Dictionary result = _mcp_initialize(params, p_session_id, r_new_session_id);
+		Dictionary result = _mcp_initialize(params, p_session_id, p_query_categories, r_new_session_id);
 		return _make_jsonrpc_result(id, result);
 	}
 	if (method == "ping") {
 		return _make_jsonrpc_result(id, Dictionary());
 	}
 	if (method == "tools/list") {
-		return _make_jsonrpc_result(id, _mcp_tools_list(params));
+		return _make_jsonrpc_result(id, _mcp_tools_list(params, p_session_id, p_query_categories));
 	}
 	if (method == "tools/call") {
 		return _make_jsonrpc_result(id, _mcp_tools_call(params));
@@ -857,7 +874,7 @@ Variant MinaMCPServer::_handle_jsonrpc_message(const Variant &p_msg, const Strin
 	return _make_jsonrpc_error(id, -32601, vformat("Method not found: '%s'", method));
 }
 
-Dictionary MinaMCPServer::_mcp_initialize(const Dictionary &p_params, const String &p_existing_session_id, String &r_session_id) {
+Dictionary MinaMCPServer::_mcp_initialize(const Dictionary &p_params, const String &p_existing_session_id, const HashSet<String> &p_query_categories, String &r_session_id) {
 	String requested_version = p_params.get("protocolVersion", "2025-03-26");
 	String negotiated_version = "2025-03-26";
 	if (requested_version == "2025-06-18" || requested_version == "2025-03-26" || requested_version == "2024-11-05") {
@@ -878,6 +895,9 @@ Dictionary MinaMCPServer::_mcp_initialize(const Dictionary &p_params, const Stri
 	info.request_count = MAX<uint64_t>(info.request_count, 1);
 	if (info.transport.is_empty()) {
 		info.transport = "streamable_http";
+	}
+	if (!p_query_categories.is_empty()) {
+		info.category_filter = p_query_categories;
 	}
 	_notify_sessions_changed();
 
@@ -905,10 +925,20 @@ Dictionary MinaMCPServer::_mcp_initialize(const Dictionary &p_params, const Stri
 	return result;
 }
 
-Dictionary MinaMCPServer::_mcp_tools_list(const Dictionary &p_params) const {
+Dictionary MinaMCPServer::_mcp_tools_list(const Dictionary &p_params, const String &p_session_id, const HashSet<String> &p_query_categories) const {
+	const HashSet<String> *override_filter = nullptr;
+	if (!p_query_categories.is_empty()) {
+		override_filter = &p_query_categories;
+	} else if (!p_session_id.is_empty() && sessions.has(p_session_id) && !sessions[p_session_id].category_filter.is_empty()) {
+		override_filter = &sessions[p_session_id].category_filter;
+	}
+
 	Array list;
 	for (int i = 0; i < tool_order.size(); i++) {
 		const String &name = tool_order[i];
+		if (!is_tool_exposed(name, override_filter)) {
+			continue;
+		}
 		const ToolDefinition *def = tools.getptr(name);
 		if (!def) {
 			continue;
@@ -1073,6 +1103,170 @@ PackedStringArray MinaMCPServer::get_tool_names() const {
 		out.write[i] = tool_order[i];
 	}
 	return out;
+}
+
+int MinaMCPServer::get_exposed_tool_count() const {
+	int count = 0;
+	for (int i = 0; i < tool_order.size(); i++) {
+		if (is_tool_exposed(tool_order[i])) {
+			count++;
+		}
+	}
+	return count;
+}
+
+PackedStringArray MinaMCPServer::get_categories() const {
+	HashSet<String> seen;
+	Vector<String> ordered;
+	for (int i = 0; i < tool_order.size(); i++) {
+		const ToolDefinition *def = tools.getptr(tool_order[i]);
+		if (!def) {
+			continue;
+		}
+		String cat = def->category.is_empty() ? String("general") : def->category.to_lower();
+		if (!seen.has(cat)) {
+			seen.insert(cat);
+			ordered.push_back(cat);
+		}
+	}
+	PackedStringArray out;
+	out.resize(ordered.size());
+	for (int i = 0; i < ordered.size(); i++) {
+		out.write[i] = ordered[i];
+	}
+	return out;
+}
+
+PackedStringArray MinaMCPServer::get_enabled_categories() const {
+	PackedStringArray out;
+	if (enabled_categories.is_empty()) {
+		return get_categories();
+	}
+	for (const String &cat : enabled_categories) {
+		out.push_back(cat);
+	}
+	out.sort();
+	return out;
+}
+
+void MinaMCPServer::set_enabled_categories(const PackedStringArray &p_categories) {
+	enabled_categories.clear();
+	for (int i = 0; i < p_categories.size(); i++) {
+		String c = p_categories[i].strip_edges().to_lower();
+		if (c == "*" || c == "all") {
+			enabled_categories.clear();
+			break;
+		}
+		if (!c.is_empty()) {
+			enabled_categories.insert(c);
+		}
+	}
+	broadcast_tools_list_changed();
+	_notify_status_changed();
+}
+
+void MinaMCPServer::set_category_enabled(const String &p_category, bool p_enabled) {
+	String cat = p_category.strip_edges().to_lower();
+	if (cat.is_empty()) {
+		return;
+	}
+	if (enabled_categories.is_empty()) {
+		if (p_enabled) {
+			return; // Already all enabled.
+		}
+		// Materialize all existing categories except the one being disabled.
+		PackedStringArray all = get_categories();
+		for (int i = 0; i < all.size(); i++) {
+			if (all[i] != cat) {
+				enabled_categories.insert(all[i]);
+			}
+		}
+	} else {
+		if (p_enabled) {
+			enabled_categories.insert(cat);
+			// If every category is now enabled, normalize back to empty (= all).
+			PackedStringArray all = get_categories();
+			bool all_on = true;
+			for (int i = 0; i < all.size(); i++) {
+				if (!enabled_categories.has(all[i])) {
+					all_on = false;
+					break;
+				}
+			}
+			if (all_on) {
+				enabled_categories.clear();
+			}
+		} else {
+			enabled_categories.erase(cat);
+		}
+	}
+	broadcast_tools_list_changed();
+	_notify_status_changed();
+}
+
+bool MinaMCPServer::is_category_enabled(const String &p_category) const {
+	String cat = p_category.strip_edges().to_lower();
+	if (enabled_categories.is_empty()) {
+		return true;
+	}
+	return enabled_categories.has(cat);
+}
+
+bool MinaMCPServer::is_tool_exposed(const String &p_name, const HashSet<String> *p_override_filter) const {
+	// Always keep core MCP category-management tools exposed so clients can never lock themselves out.
+	if (p_name == "mcp_list_categories" || p_name == "mcp_set_enabled_categories" || p_name == "engine_get_status") {
+		return true;
+	}
+	const ToolDefinition *def = tools.getptr(p_name);
+	if (!def) {
+		return false;
+	}
+	String cat = def->category.is_empty() ? String("general") : def->category.to_lower();
+	if (p_override_filter && !p_override_filter->is_empty()) {
+		return p_override_filter->has(cat);
+	}
+	if (enabled_categories.is_empty()) {
+		return true;
+	}
+	return enabled_categories.has(cat);
+}
+
+Array MinaMCPServer::get_categories_summary() const {
+	PackedStringArray cats = get_categories();
+	Array out;
+	for (int i = 0; i < cats.size(); i++) {
+		const String &cat = cats[i];
+		Array cat_tools;
+		for (int j = 0; j < tool_order.size(); j++) {
+			const ToolDefinition *def = tools.getptr(tool_order[j]);
+			if (!def) {
+				continue;
+			}
+			String dc = def->category.is_empty() ? String("general") : def->category.to_lower();
+			if (dc == cat) {
+				cat_tools.push_back(def->name);
+			}
+		}
+		Dictionary entry;
+		entry["category"] = cat;
+		entry["enabled"] = is_category_enabled(cat);
+		entry["tool_count"] = cat_tools.size();
+		entry["tools"] = cat_tools;
+		out.push_back(entry);
+	}
+	return out;
+}
+
+void MinaMCPServer::broadcast_tools_list_changed() {
+	Dictionary notif;
+	notif["jsonrpc"] = "2.0";
+	notif["method"] = "notifications/tools/list_changed";
+	String payload = JSON::stringify(notif);
+	for (int i = 0; i < connections.size(); i++) {
+		if (connections[i].is_sse && connections[i].peer.is_valid()) {
+			_send_sse_event(connections[i].peer, "message", payload);
+		}
+	}
 }
 
 void MinaMCPServer::register_resource(const ResourceDefinition &p_resource) {
@@ -1399,6 +1593,8 @@ Dictionary MinaMCPServer::get_status_dictionary() const {
 	d["last_error"] = last_error;
 	d["sessions_count"] = sessions.size();
 	d["tools_count"] = tool_order.size();
+	d["exposed_tools_count"] = get_exposed_tool_count();
+	d["enabled_categories"] = mcp::variant_to_json(get_enabled_categories());
 	d["resources_count"] = resource_order.size();
 	d["total_requests"] = (int64_t)total_requests;
 	d["uptime_msec"] = (int64_t)get_uptime_msec();

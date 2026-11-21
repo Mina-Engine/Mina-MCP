@@ -68,6 +68,7 @@ public:
 		uint64_t last_activity_msec = 0;
 		uint64_t request_count = 0;
 		String transport = "streamable_http";
+		HashSet<String> category_filter; // Empty = use server's enabled_categories.
 	};
 
 	struct LogEntry {
@@ -134,6 +135,7 @@ private:
 
 	HashMap<String, ToolDefinition> tools;
 	Vector<String> tool_order;
+	HashSet<String> enabled_categories; // Empty = all categories enabled.
 	HashMap<String, ResourceDefinition> resources;
 	Vector<String> resource_order;
 
@@ -182,11 +184,11 @@ private:
 	void _broadcast_sse_to_session(const String &p_session_id, const String &p_event, const String &p_data);
 
 	// MCP JSON-RPC 2.0 handlers.
-	Variant _handle_jsonrpc_message(const Variant &p_msg, const String &p_session_id, String &r_new_session_id, bool &r_has_response);
+	Variant _handle_jsonrpc_message(const Variant &p_msg, const String &p_session_id, const HashSet<String> &p_query_categories, String &r_new_session_id, bool &r_has_response);
 	Dictionary _make_jsonrpc_result(const Variant &p_id, const Variant &p_result) const;
 	Dictionary _make_jsonrpc_error(const Variant &p_id, int p_code, const String &p_message, const Variant &p_data = Variant()) const;
-	Dictionary _mcp_initialize(const Dictionary &p_params, const String &p_existing_session_id, String &r_session_id);
-	Dictionary _mcp_tools_list(const Dictionary &p_params) const;
+	Dictionary _mcp_initialize(const Dictionary &p_params, const String &p_existing_session_id, const HashSet<String> &p_query_categories, String &r_session_id);
+	Dictionary _mcp_tools_list(const Dictionary &p_params, const String &p_session_id, const HashSet<String> &p_query_categories) const;
 	Dictionary _mcp_tools_call(const Dictionary &p_params);
 	Dictionary _mcp_resources_list(const Dictionary &p_params) const;
 	Dictionary _mcp_resources_read(const Dictionary &p_params) const;
@@ -230,7 +232,18 @@ public:
 	void unregister_tool(const String &p_name);
 	bool has_tool(const String &p_name) const;
 	int get_tool_count() const { return tool_order.size(); }
+	int get_exposed_tool_count() const;
 	PackedStringArray get_tool_names() const;
+
+	// Category-based tool exposure management (prevents AI context bloat).
+	PackedStringArray get_categories() const;
+	PackedStringArray get_enabled_categories() const;
+	void set_enabled_categories(const PackedStringArray &p_categories);
+	void set_category_enabled(const String &p_category, bool p_enabled);
+	bool is_category_enabled(const String &p_category) const;
+	bool is_tool_exposed(const String &p_name, const HashSet<String> *p_override_filter = nullptr) const;
+	Array get_categories_summary() const;
+	void broadcast_tools_list_changed();
 
 	void register_resource(const ResourceDefinition &p_resource);
 	void unregister_resource(const String &p_uri);

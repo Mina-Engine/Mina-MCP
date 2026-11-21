@@ -11,6 +11,7 @@
 #include "mcp_editor_plugin.h"
 
 #include "../mcp_server.h"
+#include "mcp_builtin_tools.h"
 #include "mcp_runtime_debugger_plugin.h"
 #include "core/object/callable_mp.h"
 #include "core/os/os.h"
@@ -23,6 +24,7 @@
 #include "scene/gui/box_container.h"
 #include "scene/gui/button.h"
 #include "scene/gui/check_box.h"
+#include "scene/gui/flow_container.h"
 #include "scene/gui/item_list.h"
 #include "scene/gui/label.h"
 #include "scene/gui/line_edit.h"
@@ -169,6 +171,23 @@ void MCPEditorPlugin::_build_dock() {
 	stats_label->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
 	root->add_child(stats_label);
 
+	HBoxContainer *cat_header = memnew(HBoxContainer);
+	Label *cat_title = memnew(Label);
+	cat_title->set_text(String::utf8("公開カテゴリ"));
+	cat_title->set_h_size_flags(Control::SIZE_EXPAND_FILL);
+	cat_header->add_child(cat_title);
+	Button *cat_all_btn = memnew(Button);
+	cat_all_btn->set_text(String::utf8("すべて"));
+	cat_all_btn->connect(SceneStringName(pressed), callable_mp(this, &MCPEditorPlugin::_on_reset_all_categories));
+	cat_header->add_child(cat_all_btn);
+	root->add_child(cat_header);
+
+	categories_flow = memnew(HFlowContainer);
+	categories_flow->add_theme_constant_override("h_separation", 6 * EDSCALE);
+	categories_flow->add_theme_constant_override("v_separation", 2 * EDSCALE);
+	root->add_child(categories_flow);
+	_rebuild_category_toggles();
+
 	Label *sessions_title = memnew(Label);
 	sessions_title->set_text(String::utf8("接続中のクライアント"));
 	root->add_child(sessions_title);
@@ -200,6 +219,80 @@ void MCPEditorPlugin::_build_dock() {
 	_refresh_ui();
 }
 
+void MCPEditorPlugin::_rebuild_category_toggles() {
+	MinaMCPServer *server = MinaMCPServer::get_singleton();
+	if (!categories_flow || !server) {
+		return;
+	}
+	for (int i = categories_flow->get_child_count() - 1; i >= 0; i--) {
+		Node *child = categories_flow->get_child(i);
+		categories_flow->remove_child(child);
+		memdelete(child);
+	}
+	category_checks.clear();
+
+	PackedStringArray cats = server->get_categories();
+	for (int i = 0; i < cats.size(); i++) {
+		const String &cat = cats[i];
+		CheckBox *cb = memnew(CheckBox);
+		cb->set_text(cat);
+		cb->set_pressed(server->is_category_enabled(cat));
+		cb->connect(SceneStringName(toggled), callable_mp(this, &MCPEditorPlugin::_on_category_toggled).bind(cat));
+		categories_flow->add_child(cb);
+		category_checks[cat] = cb;
+	}
+}
+
+void MCPEditorPlugin::_apply_categories_from_settings() {
+	MinaMCPServer *server = MinaMCPServer::get_singleton();
+	if (!server || !EditorSettings::get_singleton() || !EditorSettings::get_singleton()->has_setting("network/mcp_server/enabled_categories")) {
+		return;
+	}
+	String csv = String(EditorSettings::get_singleton()->get_setting("network/mcp_server/enabled_categories")).strip_edges();
+	if (csv.is_empty()) {
+		server->set_enabled_categories(PackedStringArray());
+		return;
+	}
+	PackedStringArray parts = csv.split(",", false);
+	server->set_enabled_categories(parts);
+}
+
+void MCPEditorPlugin::_save_categories_to_settings() {
+	MinaMCPServer *server = MinaMCPServer::get_singleton();
+	if (!server || !EditorSettings::get_singleton()) {
+		return;
+	}
+	PackedStringArray all = server->get_categories();
+	PackedStringArray enabled = server->get_enabled_categories();
+	String csv;
+	if (enabled.size() < all.size()) {
+		csv = String(",").join(enabled);
+	}
+	EditorSettings::get_singleton()->set_setting("network/mcp_server/enabled_categories", csv);
+	EditorSettings::get_singleton()->save();
+}
+
+void MCPEditorPlugin::_on_category_toggled(bool p_pressed, const String &p_category) {
+	if (updating_ui) {
+		return;
+	}
+	MinaMCPServer *server = MinaMCPServer::get_singleton();
+	if (!server) {
+		return;
+	}
+	server->set_category_enabled(p_category, p_pressed);
+	_save_categories_to_settings();
+}
+
+void MCPEditorPlugin::_on_reset_all_categories() {
+	MinaMCPServer *server = MinaMCPServer::get_singleton();
+	if (!server) {
+		return;
+	}
+	server->set_enabled_categories(PackedStringArray());
+	_save_categories_to_settings();
+}
+
 void MCPEditorPlugin::_attempt_auto_start() {
 	MinaMCPServer *server = MinaMCPServer::get_singleton();
 	if (!server) {
@@ -207,6 +300,8 @@ void MCPEditorPlugin::_attempt_auto_start() {
 	}
 	server->set_mode_name("editor");
 	server->invoke_provider_callbacks();
+	_apply_categories_from_settings();
+	_rebuild_category_toggles();
 
 	if (!_resolve_auto_start()) {
 		_refresh_ui();
@@ -270,8 +365,20 @@ void MCPEditorPlugin::_refresh_ui() {
 	endpoint_field->set_text(server->get_endpoint_url());
 	port_spin->set_value(server->get_port());
 	auto_start_check->set_pressed(_resolve_auto_start());
-	stats_label->set_text(vformat(String::utf8("公開ツール: %d  |  リソース: %d  |  累計リクエスト: %d"),
-			server->get_tool_count(), server->get_resource_count(), (int64_t)server->get_total_requests()));
+	stats_label->set_text(vformat(String::utf8("公開ツール: %d / %d  |  リソース: %d  |  累計リクエスト: %d"),
+			server->get_exposed_tool_count(), server->get_tool_count(), server->get_resource_count(), (int64_t)server->get_total_requests()));
+
+	if (categories_flow) {
+		if (category_checks.size() != (uint32_t)server->get_categories().size()) {
+			_rebuild_category_toggles();
+		} else {
+			for (const KeyValue<String, CheckBox *> &E : category_checks) {
+				if (E.value) {
+					E.value->set_pressed_no_signal(server->is_category_enabled(E.key));
+				}
+			}
+		}
+	}
 
 	updating_ui = false;
 	_refresh_sessions();
@@ -451,6 +558,7 @@ void MCPEditorPlugin::_notification(int p_what) {
 				_start_server_from_settings();
 			}
 
+			mcp_requested_tools_process();
 			if (server->is_running()) {
 				server->poll();
 			}

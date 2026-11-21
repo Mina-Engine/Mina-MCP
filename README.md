@@ -22,7 +22,10 @@ It automatically starts alongside the game engine (in both **Project Manager** a
   - Binds exclusively to `127.0.0.1:6800` by default.
   - Validates `Host` and `Origin` headers to prevent unintended external exposure and DNS rebinding attacks.
 - **Built-in Management Dock (`MCP Server`)**
-  - Live status (`Running` / `Stopped` / `Error`), Start / Stop / Restart controls, port & auto-start settings, connected sessions list, one-click endpoint URL & generic MCP JSON config copy, and live tool execution feed.
+  - Live status (`Running` / `Stopped` / `Error`), Start / Stop / Restart controls, port & auto-start settings, **category exposure toggles (`公開カテゴリ`)**, connected sessions list, one-click endpoint URL & generic MCP JSON config copy, and live tool execution feed.
+- **Category-Based Tool Exposure (Context-Size Control)**
+  - Expose only the tool categories needed for the current task (e.g. `scene`, `nodes`, `runtime`, `animation`, `lighting`, `export`) to avoid bloating AI context windows.
+  - Controlled via the `MCP Server` dock checkboxes, `EditorSettings` (`network/mcp_server/enabled_categories`), dynamic MCP tools (`mcp_list_categories`, `mcp_set_enabled_categories` with `notifications/tools/list_changed`), or per-session URL query parameters (e.g. `http://127.0.0.1:6800/mcp?categories=scene,nodes,runtime`).
 - **Extensible Architecture**
   - C++ modules register tools via `MinaMCPServer::add_provider_callback(...)` without modifying core MCP code.
   - GDScript / GDExtension plugins register tools dynamically via `MinaMCPServer.register_script_tool(...)` and `register_script_resource(...)`.
@@ -64,7 +67,7 @@ url = "http://127.0.0.1:6800/mcp"
 
 | Method | Options |
 |---|---|
-| **Editor Settings** | `network/mcp_server/auto_start` (`true`), `network/mcp_server/host` (`127.0.0.1`), `network/mcp_server/port` (`6800`), `network/mcp_server/allow_remote` (`false`) |
+| **Editor Settings** | `network/mcp_server/auto_start` (`true`), `network/mcp_server/host` (`127.0.0.1`), `network/mcp_server/port` (`6800`), `network/mcp_server/allow_remote` (`false`), `network/mcp_server/enabled_categories` (`""` = all) |
 | **CLI Flags** | `--mcp-port <port>`, `--no-mcp` |
 | **Environment Variables** | `MINA_MCP_PORT`, `MINA_MCP_HOST`, `MINA_MCP_DISABLE=1` |
 
@@ -79,9 +82,9 @@ url = "http://127.0.0.1:6800/mcp"
 - `mina://logs/recent` — Recent captured editor and running-game stdout, warnings, and errors
 - `mina://debug/runtime_errors` — Structured running-game runtime errors, warnings, debugger breaks, and stack traces
 
-### Built-in Tools (76 core tools + extensible module tools)
-- **Engine & Project (10):** `engine_get_status`, `project_create`, `project_list`, `project_open`, `project_get_info`, `project_get_setting`, `project_set_setting`, `project_list_settings`, `project_configure_input_action`, `project_manage_autoload`
-- **Scene & Nodes & Editor (23):** `scene_list_open`, `scene_create`, `scene_open`, `scene_save`, `scene_close`, `scene_get_tree`, `scene_instantiate`, `node_create`, `node_delete`, `node_duplicate`, `node_reparent`, `node_rename`, `node_get_properties`, `node_set_properties`, `node_set_transform`, `node_manage_groups`, `node_connect_signal`, `node_disconnect_signal`, `node_list_signals`, `node_call_method`, `editor_select_nodes`, `editor_undo`, `editor_redo`
+### Built-in Tools (85 core tools + extensible module tools)
+- **Engine & Project (12):** `engine_get_status`, `mcp_list_categories`, `mcp_set_enabled_categories`, `project_create`, `project_list`, `project_open`, `project_get_info`, `project_get_setting`, `project_set_setting`, `project_list_settings`, `project_configure_input_action`, `project_manage_autoload`
+- **Scene & Nodes & Editor (30):** `scene_list_open`, `scene_create`, `scene_open`, `scene_save`, `scene_close`, `scene_get_tree`, `scene_find_nodes` (search by name/pattern/class/group/script/property without dumping full scene tree), `scene_diff` (diff edited scene against saved `.tscn` or another scene), `scene_create_inherited`, `scene_pack_selection`, `scene_instantiate`, `node_create`, `node_delete`, `node_duplicate`, `node_reparent`, `node_rename`, `node_get_properties`, `node_set_properties`, `node_set_transform`, `node_get_bounds`, `node_align`, `node_snap_to_surface`, `node_manage_groups`, `node_connect_signal`, `node_disconnect_signal`, `node_list_signals`, `node_call_method`, `editor_select_nodes`, `editor_undo`, `editor_redo`
 - **Assets & Scripts (17):** `asset_list_files`, `asset_get_info`, `asset_create_resource`, `asset_inspect_resource`, `asset_update_resource`, `asset_create_directory`, `asset_move_file`, `asset_copy_file`, `asset_delete_file`, `asset_scan_filesystem`, `asset_reimport`, `script_read`, `script_write`, `script_patch`, `script_attach`, `script_validate`, `script_open_in_editor`
 - **Animation, Lighting & ClassDB Introspection (11):** `animation_list`, `animation_create`, `animation_delete`, `animation_add_track`, `animation_insert_key`, `animation_remove_key`, `animation_get_details`, `lighting_add_light`, `lighting_configure_environment`, `class_list`, `class_get_info`
 - **Runtime, Input Automation, Debugging & Export (15):** `game_play`, `game_stop`, `game_get_status`, `game_capture_runtime` (live running game PNG screenshot), `game_send_input` (keyboard, chords, holds, mouse relative/absolute motion, clicks, scroll, gamepad buttons/sticks, ordered sequences, `release_all` — scoped exclusively to the target game process), `debug_get_logs`, `debug_clear_logs`, `debug_get_runtime_errors`, `debug_clear_runtime_errors`, `debug_set_breakpoint`, `debug_capture_viewport`, `export_list_platforms`, `export_list_presets`, `export_create_preset`, `export_project`

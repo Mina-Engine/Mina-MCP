@@ -16,6 +16,7 @@
 class Button;
 class CheckBox;
 class EditorDock;
+class HFlowContainer;
 class ItemList;
 class Label;
 class LineEdit;
@@ -36,6 +37,8 @@ class MCPEditorPlugin : public EditorPlugin {
 	Button *toggle_button = nullptr;
 	Button *restart_button = nullptr;
 	Label *stats_label = nullptr;
+	HFlowContainer *categories_flow = nullptr;
+	HashMap<String, CheckBox *> category_checks;
 	ItemList *sessions_list = nullptr;
 	RichTextLabel *activity_log = nullptr;
 
@@ -45,6 +48,9 @@ class MCPEditorPlugin : public EditorPlugin {
 	uint64_t next_retry_msec = 0;
 
 	void _build_dock();
+	void _rebuild_category_toggles();
+	void _apply_categories_from_settings();
+	void _save_categories_to_settings();
 	void _refresh_ui();
 	void _refresh_sessions();
 	void _refresh_activity();
@@ -54,6 +60,8 @@ class MCPEditorPlugin : public EditorPlugin {
 	void _on_restart_server();
 	void _on_port_changed(double p_value);
 	void _on_auto_start_toggled(bool p_pressed);
+	void _on_category_toggled(bool p_pressed, const String &p_category);
+	void _on_reset_all_categories();
 	void _on_copy_url();
 	void _on_copy_mcp_config();
 	void _on_clear_activity();

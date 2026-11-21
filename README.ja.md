@@ -22,7 +22,10 @@
   - デフォルトで `127.0.0.1:6800` のみにバインド。
   - `Host` / `Origin` ヘッダーを検証し、不用意な外部公開や DNS リバインディングを防止。
 - **エディタ内管理ドック（`MCP Server`）**
-  - 稼働状況、起動・停止・再起動、ポート番号・自動起動設定、接続中セッション一覧、エンドポイント URL・汎用 MCP 設定 JSON のワンクリックコピー、リアルタイム実行ログを提供。
+  - 稼働状況、起動・停止・再起動、ポート番号・自動起動設定、**カテゴリ別ツール公開切替（`公開カテゴリ`）**、接続中セッション一覧、エンドポイント URL・汎用 MCP 設定 JSON のワンクリックコピー、リアルタイム実行ログを提供。
+- **カテゴリ別ツール公開制御（コンテキスト圧迫防止）**
+  - `scene` / `nodes` / `runtime` / `animation` / `lighting` / `export` など、作業に必要なカテゴリだけを AI に公開可能。
+  - `MCP Server` ドックのチェックボックス、`EditorSettings`（`network/mcp_server/enabled_categories`）、動的ツール（`mcp_list_categories` / `mcp_set_enabled_categories`）、およびセッション単位の URL クエリ（例: `http://127.0.0.1:6800/mcp?categories=scene,nodes,runtime`）に対応。
 - **高い拡張性**
   - C++ モジュールは `MinaMCPServer::add_provider_callback(...)` でコアコードを変更せずツールを追加可能。
   - GDScript / GDExtension からは `MinaMCPServer.register_script_tool(...)` / `register_script_resource(...)` で動的登録可能。
@@ -62,7 +65,7 @@ url = "http://127.0.0.1:6800/mcp"
 
 ## 設定・CLI・環境変数
 
-- **エディター設定**: `network/mcp_server/auto_start`, `network/mcp_server/host`, `network/mcp_server/port`, `network/mcp_server/allow_remote`
+- **エディター設定**: `network/mcp_server/auto_start`, `network/mcp_server/host`, `network/mcp_server/port`, `network/mcp_server/allow_remote`, `network/mcp_server/enabled_categories`
 - **CLI オプション**: `--mcp-port <port>`, `--no-mcp`
 - **環境変数**: `MINA_MCP_PORT`, `MINA_MCP_HOST`, `MINA_MCP_DISABLE=1`
 
@@ -71,8 +74,8 @@ url = "http://127.0.0.1:6800/mcp"
 ## 公開ツール・リソース一覧
 
 - **ライブ MCP リソース（5種）**: `mina://engine/status`, `mina://project/info`, `mina://scene/current`, `mina://logs/recent`, `mina://debug/runtime_errors`
-- **エンジン・プロジェクト（10）**: `engine_get_status`, `project_create`, `project_list`, `project_open`, `project_get_info`, `project_get_setting`, `project_set_setting`, `project_list_settings`, `project_configure_input_action`, `project_manage_autoload`
-- **シーン・ノード・エディタ操作（23）**: `scene_list_open`, `scene_create`, `scene_open`, `scene_save`, `scene_close`, `scene_get_tree`, `scene_instantiate`, `node_create`, `node_delete`, `node_duplicate`, `node_reparent`, `node_rename`, `node_get_properties`, `node_set_properties`, `node_set_transform`, `node_manage_groups`, `node_connect_signal`, `node_disconnect_signal`, `node_list_signals`, `node_call_method`, `editor_select_nodes`, `editor_undo`, `editor_redo`
+- **エンジン・プロジェクト（12）**: `engine_get_status`, `mcp_list_categories`, `mcp_set_enabled_categories`, `project_create`, `project_list`, `project_open`, `project_get_info`, `project_get_setting`, `project_set_setting`, `project_list_settings`, `project_configure_input_action`, `project_manage_autoload`
+- **シーン・ノード・エディタ操作（30）**: `scene_list_open`, `scene_create`, `scene_open`, `scene_save`, `scene_close`, `scene_get_tree`, `scene_find_nodes`（名前・クラス・グループ・スクリプト・プロパティ条件検索）, `scene_diff`（保存済み `.tscn` 等との差分比較）, `scene_create_inherited`（継承シーン作成）, `scene_pack_selection`（選択ノードの再利用シーン化）, `scene_instantiate`, `node_create`, `node_delete`, `node_duplicate`, `node_reparent`, `node_rename`, `node_get_properties`, `node_set_properties`, `node_set_transform`, `node_get_bounds`（3D AABB / 2D Rect2 境界ボックス取得）, `node_align`（複数ノードの整列・等間隔配置）, `node_snap_to_surface`（床・壁・天井へのスナップ配置）, `node_manage_groups`, `node_connect_signal`, `node_disconnect_signal`, `node_list_signals`, `node_call_method`, `editor_select_nodes`, `editor_undo`, `editor_redo`
 - **アセット・スクリプト（17）**: `asset_list_files`, `asset_get_info`, `asset_create_resource`, `asset_inspect_resource`, `asset_update_resource`, `asset_create_directory`, `asset_move_file`, `asset_copy_file`, `asset_delete_file`, `asset_scan_filesystem`, `asset_reimport`, `script_read`, `script_write`, `script_patch`, `script_attach`, `script_validate`, `script_open_in_editor`
 - **アニメーション・ライティング・型情報（11）**: `animation_list`, `animation_create`, `animation_delete`, `animation_add_track`, `animation_insert_key`, `animation_remove_key`, `animation_get_details`, `lighting_add_light`, `lighting_configure_environment`, `class_list`, `class_get_info`
 - **ゲーム実行・入力操作・デバッグ・ビルド/エクスポート（15）**: `game_play`, `game_stop`, `game_get_status`, `game_capture_runtime`（実行中ゲーム画面のPNG撮影）, `game_send_input`（キーボード・同時押し・長押し・マウス相対/絶対移動・クリック・スクロール・ゲームパッド・順序保証シーケンス・全解除／対象ゲームプロセス限定）, `debug_get_logs`, `debug_clear_logs`, `debug_get_runtime_errors`, `debug_clear_runtime_errors`, `debug_set_breakpoint`, `debug_capture_viewport`, `export_list_platforms`, `export_list_presets`, `export_create_preset`, `export_project`

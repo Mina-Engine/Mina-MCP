@@ -33,12 +33,20 @@ class MCPRuntimeDebuggerPlugin : public EditorDebuggerPlugin {
 		String error;
 	};
 
+	struct PendingRuntimeRequest {
+		bool done = false;
+		bool ok = false;
+		Dictionary result;
+		String error;
+	};
+
 	static MCPRuntimeDebuggerPlugin *singleton;
 
 	int active_session_id = -1;
 	int64_t next_request_id = 1;
 	HashMap<int64_t, PendingCapture> pending_captures;
 	HashMap<int64_t, PendingInputAck> pending_inputs;
+	HashMap<int64_t, PendingRuntimeRequest> pending_runtime_requests;
 
 	void _on_session_started(int p_session_id);
 	void _on_session_stopped(int p_session_id);
@@ -62,6 +70,7 @@ public:
 
 	Dictionary request_capture_runtime(int p_max_width, const String &p_save_path, int p_timeout_msec = 5000);
 	Dictionary request_send_input(const Dictionary &p_payload, bool p_wait_for_completion, int p_timeout_msec = 10000);
+	Dictionary request_runtime(const String &p_operation, const Dictionary &p_payload, int p_timeout_msec = 5000);
 
 	MCPRuntimeDebuggerPlugin();
 	~MCPRuntimeDebuggerPlugin();

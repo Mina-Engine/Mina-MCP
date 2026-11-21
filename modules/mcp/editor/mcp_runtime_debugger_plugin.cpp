@@ -73,6 +73,11 @@ void MCPRuntimeDebuggerPlugin::_cancel_all_pending(const String &p_reason) {
 		E.value.ok = false;
 		E.value.error = p_reason;
 	}
+	for (KeyValue<int64_t, PendingRuntimeRequest> &E : pending_runtime_requests) {
+		E.value.done = true;
+		E.value.ok = false;
+		E.value.error = p_reason;
+	}
 }
 
 bool MCPRuntimeDebuggerPlugin::capture(const String &p_message, const Array &p_data, int p_session) {
@@ -98,6 +103,18 @@ bool MCPRuntimeDebuggerPlugin::capture(const String &p_message, const Array &p_d
 				pi->executed_steps = int(p_data[2]);
 				pi->error = String(p_data[3]);
 				pi->done = true;
+			}
+		}
+		return true;
+	}
+	if (p_message == "mina_mcp:runtime_result") {
+		if (p_data.size() >= 3) {
+			int64_t rid = int64_t(p_data[0]);
+			if (PendingRuntimeRequest *request = pending_runtime_requests.getptr(rid)) {
+				request->ok = bool(p_data[1]);
+				request->result = p_data[2];
+				request->error = p_data.size() > 3 ? String(p_data[3]) : String();
+				request->done = true;
 			}
 		}
 		return true;
@@ -250,6 +267,53 @@ Dictionary MCPRuntimeDebuggerPlugin::request_capture_runtime(int p_max_width, co
 		meta["saved_path"] = mcp::normalize_res_path(p_save_path);
 	}
 	return mcp::make_image_result(b64, meta);
+}
+
+Dictionary MCPRuntimeDebuggerPlugin::request_runtime(const String &p_operation, const Dictionary &p_payload, int p_timeout_msec) {
+	if (!wait_for_active_session(2500)) {
+		return mcp::make_error("No active running game session. Start the game with game_play first.", "game_not_running");
+	}
+	Ref<EditorDebuggerSession> sess = _get_active_session();
+	if (sess.is_null()) {
+		return mcp::make_error("No active running game session.", "game_not_running");
+	}
+
+	int64_t rid = next_request_id++;
+	pending_runtime_requests[rid] = PendingRuntimeRequest();
+	Array args;
+	args.push_back(rid);
+	args.push_back(p_operation);
+	args.push_back(JSON::stringify(p_payload));
+	sess->send_message("mina_mcp:runtime_request", args);
+
+	uint64_t deadline = OS::get_singleton()->get_ticks_msec() + uint64_t(CLAMP(p_timeout_msec, 100, 120000));
+	while (OS::get_singleton()->get_ticks_msec() < deadline) {
+		_pump_debugger_once();
+		PendingRuntimeRequest *request = pending_runtime_requests.getptr(rid);
+		if (!request || request->done) {
+			break;
+		}
+		if (EditorInterface::get_singleton() && !EditorInterface::get_singleton()->is_playing_scene()) {
+			request->done = true;
+			request->ok = false;
+			request->error = "Game stopped while processing runtime request.";
+			break;
+		}
+		OS::get_singleton()->delay_usec(4000);
+	}
+
+	PendingRuntimeRequest result;
+	if (pending_runtime_requests.has(rid)) {
+		result = pending_runtime_requests[rid];
+		pending_runtime_requests.erase(rid);
+	}
+	if (!result.done) {
+		return mcp::make_error(vformat("Timed out waiting for runtime operation '%s'.", p_operation), "timeout");
+	}
+	if (!result.ok) {
+		return mcp::make_error(result.error.is_empty() ? String("Runtime operation failed.") : result.error, "runtime_operation_failed");
+	}
+	return mcp::make_ok(result.result);
 }
 
 Dictionary MCPRuntimeDebuggerPlugin::request_send_input(const Dictionary &p_payload, bool p_wait_for_completion, int p_timeout_msec) {

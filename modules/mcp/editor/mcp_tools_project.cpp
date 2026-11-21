@@ -110,6 +110,54 @@ Dictionary _tool_engine_get_status(const Dictionary &p_args) {
 	return mcp::make_ok(_build_engine_status());
 }
 
+Dictionary _tool_mcp_list_categories(const Dictionary &p_args) {
+	MinaMCPServer *server = MinaMCPServer::get_singleton();
+	if (!server) {
+		return mcp::make_error("MinaMCPServer is unavailable.", "unavailable");
+	}
+	Dictionary out;
+	out["total_tools"] = server->get_tool_count();
+	out["exposed_tools"] = server->get_exposed_tool_count();
+	out["categories"] = server->get_categories_summary();
+	return mcp::make_ok(out);
+}
+
+Dictionary _tool_mcp_set_enabled_categories(const Dictionary &p_args) {
+	MinaMCPServer *server = MinaMCPServer::get_singleton();
+	if (!server) {
+		return mcp::make_error("MinaMCPServer is unavailable.", "unavailable");
+	}
+	if (bool(p_args.get("reset_all", false))) {
+		server->set_enabled_categories(PackedStringArray());
+	} else if (p_args.has("categories") && p_args["categories"].get_type() == Variant::ARRAY) {
+		Array arr = p_args["categories"];
+		PackedStringArray cats;
+		for (int i = 0; i < arr.size(); i++) {
+			cats.push_back(String(arr[i]));
+		}
+		server->set_enabled_categories(cats);
+	} else {
+		if (p_args.has("enable") && p_args["enable"].get_type() == Variant::ARRAY) {
+			Array arr = p_args["enable"];
+			for (int i = 0; i < arr.size(); i++) {
+				server->set_category_enabled(String(arr[i]), true);
+			}
+		}
+		if (p_args.has("disable") && p_args["disable"].get_type() == Variant::ARRAY) {
+			Array arr = p_args["disable"];
+			for (int i = 0; i < arr.size(); i++) {
+				server->set_category_enabled(String(arr[i]), false);
+			}
+		}
+	}
+
+	Dictionary out;
+	out["total_tools"] = server->get_tool_count();
+	out["exposed_tools"] = server->get_exposed_tool_count();
+	out["enabled_categories"] = mcp::variant_to_json(server->get_enabled_categories());
+	return mcp::make_ok(out);
+}
+
 Dictionary _tool_project_create(const Dictionary &p_args) {
 	String path = String(p_args.get("path", "")).strip_edges().replace("\\", "/");
 	String name = String(p_args.get("name", "")).strip_edges();
@@ -530,6 +578,32 @@ void mcp_register_project_tools(MinaMCPServer *p_server) {
 		t.category = "engine";
 		t.input_schema = make_tool_schema(Dictionary());
 		t.handler = _tool_engine_get_status;
+		p_server->register_tool(t);
+	}
+	{
+		MinaMCPServer::ToolDefinition t;
+		t.name = "mcp_list_categories";
+		t.title = "List MCP Tool Categories";
+		t.description = "List all MCP tool categories, their tool counts, and which categories are currently exposed in tools/list.";
+		t.category = "engine";
+		t.input_schema = make_tool_schema(Dictionary());
+		t.handler = _tool_mcp_list_categories;
+		p_server->register_tool(t);
+	}
+	{
+		Dictionary props;
+		props["categories"] = schema_array("Replace active category allowlist with these categories (e.g. ['scene', 'nodes', 'runtime']).", schema_string("Category name"));
+		props["enable"] = schema_array("Add these categories to the exposed set.", schema_string("Category name"));
+		props["disable"] = schema_array("Remove these categories from the exposed set.", schema_string("Category name"));
+		props["reset_all"] = schema_bool("Re-enable all categories (default: false).");
+
+		MinaMCPServer::ToolDefinition t;
+		t.name = "mcp_set_enabled_categories";
+		t.title = "Set Exposed MCP Tool Categories";
+		t.description = "Dynamically control which tool categories are exposed in tools/list to minimize AI context size, broadcasting notifications/tools/list_changed.";
+		t.category = "engine";
+		t.input_schema = make_tool_schema(props);
+		t.handler = _tool_mcp_set_enabled_categories;
 		p_server->register_tool(t);
 	}
 	{

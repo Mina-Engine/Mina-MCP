@@ -17,7 +17,16 @@
 #include "core/io/dir_access.h"
 #include "core/io/image.h"
 #include "core/io/json.h"
+#include "core/object/class_db.h"
 #include "core/os/os.h"
+#include "main/performance.h"
+#include "scene/3d/node_3d.h"
+#include "scene/gui/control.h"
+#include "scene/main/node.h"
+#include "scene/main/scene_tree.h"
+#include "scene/main/viewport.h"
+#include "servers/navigation_3d/navigation_server_3d.h"
+#include "servers/physics_3d/physics_server_3d.h"
 #include "mcp_variant_codec.h"
 #include "scene/main/scene_tree.h"
 #include "scene/main/viewport.h"
@@ -63,6 +72,7 @@ void MCPRuntimeInputDriver::_notification(int p_what) {
 	switch (p_what) {
 		case NOTIFICATION_INTERNAL_PROCESS: {
 			_tick_queue();
+			_sample_runtime_events();
 		} break;
 
 		case NOTIFICATION_EXIT_TREE: {
@@ -643,6 +653,37 @@ bool MCPRuntimeInputDriver::_parse_step(const Dictionary &p_dict, InputStep &r_s
 	return false;
 }
 
+void MCPRuntimeInputDriver::_sample_runtime_events() {
+	SceneTree *tree = SceneTree::get_singleton();
+	if (!tree || !tree->get_root()) return;
+	ObjectID scene_id = tree->get_current_scene() ? tree->get_current_scene()->get_instance_id() : ObjectID();
+	int node_count = tree->get_node_count();
+	auto add_event = [&](const String &p_type, const String &p_detail) {
+		Dictionary event;
+		event["id"] = (int64_t)next_runtime_event_id++;
+		event["timestamp_msec"] = (int64_t)(OS::get_singleton() ? OS::get_singleton()->get_ticks_msec() : 0);
+		event["type"] = p_type;
+		event["detail"] = p_detail;
+		runtime_events.push_back(event);
+		if (runtime_events.size() > 500) runtime_events.remove_at(0);
+	};
+	if (!event_baseline_initialized) {
+		last_scene_id = scene_id;
+		last_runtime_node_count = node_count;
+		event_baseline_initialized = true;
+		return;
+	}
+	if (scene_id != last_scene_id) {
+		Node *scene = tree->get_current_scene();
+		add_event("scene_changed", scene ? String(scene->get_name()) : String());
+		last_scene_id = scene_id;
+	}
+	if (node_count != last_runtime_node_count) {
+		add_event(node_count > last_runtime_node_count ? "nodes_added" : "nodes_removed", itos(node_count - last_runtime_node_count));
+		last_runtime_node_count = node_count;
+	}
+}
+
 void MCPRuntimeInputDriver::enqueue_command(int64_t p_request_id, const Dictionary &p_payload, bool p_ack_on_complete) {
 	// Immediate cancellation shortcut when top-level type == "release_all".
 	String top_type = String(p_payload.get("type", "")).strip_edges().to_lower();
@@ -1065,6 +1106,318 @@ Error MCPRuntimeBridge::_handle_release_all(const Array &p_args) {
 	return OK;
 }
 
+namespace {
+
+Node *_resolve_runtime_node(SceneTree *p_tree, const String &p_path) {
+	if (!p_tree || !p_tree->get_root()) {
+		return nullptr;
+	}
+	String path = p_path.strip_edges();
+	if (path.is_empty() || path == "." || path == "/") {
+		return p_tree->get_root();
+	}
+	return p_tree->get_root()->get_node_or_null(NodePath(path));
+}
+
+void _serialize_runtime_tree(Node *p_node, const String &p_path, int p_depth, int p_max_depth, int &r_count, int p_max_nodes, Array &r_out) {
+	if (!p_node || r_count >= p_max_nodes || p_depth > p_max_depth) {
+		return;
+	}
+	Dictionary item;
+	item["name"] = String(p_node->get_name());
+	item["class"] = p_node->get_class();
+	item["path"] = p_path;
+	item["child_count"] = p_node->get_child_count();
+	item["process_enabled"] = p_node->is_processing();
+	item["physics_process_enabled"] = p_node->is_physics_processing();
+	if (Node3D *node_3d = Object::cast_to<Node3D>(p_node)) {
+		item["position"] = mcp::variant_to_json(node_3d->get_position());
+		item["rotation_degrees"] = mcp::variant_to_json(node_3d->get_rotation_degrees());
+	} else if (Control *control = Object::cast_to<Control>(p_node)) {
+		item["position"] = mcp::variant_to_json(control->get_position());
+		item["size"] = mcp::variant_to_json(control->get_size());
+	}
+	r_out.push_back(item);
+	r_count++;
+	if (p_depth >= p_max_depth) {
+		return;
+	}
+	for (int i = 0; i < p_node->get_child_count() && r_count < p_max_nodes; i++) {
+		Node *child = p_node->get_child(i);
+		String child_path = p_path.is_empty() ? String(child->get_name()) : p_path.path_join(String(child->get_name()));
+		_serialize_runtime_tree(child, child_path, p_depth + 1, p_max_depth, r_count, p_max_nodes, r_out);
+	}
+}
+
+Dictionary _runtime_properties(Object *p_object, const String &p_filter) {
+	Dictionary properties;
+	if (!p_object) {
+		return properties;
+	}
+	List<PropertyInfo> list;
+	p_object->get_property_list(&list);
+	String filter = p_filter.to_lower();
+	for (const PropertyInfo &info : list) {
+		if (!(info.usage & (PROPERTY_USAGE_EDITOR | PROPERTY_USAGE_STORAGE)) || (info.usage & PROPERTY_USAGE_GROUP)) {
+			continue;
+		}
+		String name = info.name;
+		if (!filter.is_empty() && !name.to_lower().contains(filter)) {
+			continue;
+		}
+		Dictionary entry;
+		entry["type"] = Variant::get_type_name(info.type);
+		entry["value"] = mcp::variant_to_json(p_object->get(info.name));
+		properties[name] = entry;
+	}
+	return properties;
+}
+
+bool _runtime_method_allowed(const String &p_method) {
+	static const char *allowed[] = { "get_name", "get_class", "is_inside_tree", "is_visible_in_tree", "is_processing", "is_physics_processing", "get_child_count", "get_position", "get_global_position", "get_rotation", "get_rotation_degrees", "get_scale", "get_global_transform", "get_text", "get_value", "get_item_count", "get_current_scene", "get_frame", "get_physics_frames", "get_process_frames" };
+	for (const char *method : allowed) {
+		if (p_method == method) {
+			return true;
+		}
+	}
+	return false;
+}
+
+Dictionary _handle_runtime_operation(const String &p_operation, const Dictionary &p_payload) {
+	SceneTree *tree = SceneTree::get_singleton();
+	if (!tree || !tree->get_root()) {
+		return mcp::make_error("Running game SceneTree is not available.", "runtime_unavailable");
+	}
+	if (p_operation == "runtime_get_tree") {
+		Node *root = tree->get_root();
+		String start_path = String(p_payload.get("node_path", "."));
+		Node *start = _resolve_runtime_node(tree, start_path);
+		if (!start) {
+			return mcp::make_error(vformat("Runtime node '%s' was not found.", start_path), "node_not_found");
+		}
+		Array nodes;
+		int count = 0;
+		String prefix = start == root ? String() : String(start->get_name());
+		_serialize_runtime_tree(start, prefix, 0, CLAMP(int(p_payload.get("max_depth", 8)), 0, 16), count, CLAMP(int(p_payload.get("max_nodes", 300)), 1, 1000), nodes);
+		Dictionary out;
+		out["scene_root"] = tree->get_current_scene() ? String(tree->get_current_scene()->get_name()) : String();
+		out["node_count"] = count;
+		out["nodes"] = nodes;
+		return mcp::make_ok(out);
+	}
+	if (p_operation == "runtime_get_properties") {
+		String path = String(p_payload.get("node_path", "."));
+		Node *node = _resolve_runtime_node(tree, path);
+		if (!node) {
+			return mcp::make_error(vformat("Runtime node '%s' was not found.", path), "node_not_found");
+		}
+		Dictionary out;
+		out["node_path"] = path;
+		out["class"] = node->get_class();
+		out["properties"] = _runtime_properties(node, String(p_payload.get("filter", "")));
+		return mcp::make_ok(out);
+	}
+	if (p_operation == "runtime_set_properties") {
+		String path = String(p_payload.get("node_path", "."));
+		Node *node = _resolve_runtime_node(tree, path);
+		if (!node) {
+			return mcp::make_error(vformat("Runtime node '%s' was not found.", path), "node_not_found");
+		}
+		Dictionary values = p_payload.get("properties", Dictionary());
+		Array applied;
+		Array rejected;
+		Array keys = values.keys();
+		for (int key_index = 0; key_index < keys.size(); key_index++) {
+			StringName property = keys[key_index];
+			PropertyInfo info;
+			bool found = false;
+			List<PropertyInfo> list;
+			node->get_property_list(&list);
+			for (const PropertyInfo &candidate : list) {
+				if (candidate.name == property && (candidate.usage & PROPERTY_USAGE_EDITOR)) {
+					info = candidate;
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				rejected.push_back(String(property));
+				continue;
+			}
+			String conversion_error;
+			Variant value = mcp::json_to_variant(values[property], info.type, &conversion_error);
+			if (!conversion_error.is_empty()) {
+				rejected.push_back(String(property) + ": " + conversion_error);
+				continue;
+			}
+			node->set(property, value);
+			applied.push_back(String(property));
+		}
+		Dictionary out;
+		out["node_path"] = path;
+		out["applied"] = applied;
+		out["rejected"] = rejected;
+		return mcp::make_ok(out);
+	}
+	if (p_operation == "runtime_call_method") {
+		String path = String(p_payload.get("node_path", "."));
+		Node *node = _resolve_runtime_node(tree, path);
+		String method = String(p_payload.get("method", ""));
+		if (!node) {
+			return mcp::make_error(vformat("Runtime node '%s' was not found.", path), "node_not_found");
+		}
+		if (!_runtime_method_allowed(method)) {
+			return mcp::make_error(vformat("Runtime method '%s' is not in the read-only allowlist.", method), "method_not_allowed");
+		}
+		Array args = p_payload.get("args", Array());
+		if (!args.is_empty() || !node->has_method(method)) {
+			return mcp::make_error("Only available read-only allowlisted methods with no arguments may be called.", "invalid_method");
+		}
+		Variant result = node->callv(method, args);
+		Dictionary out;
+		out["node_path"] = path;
+		out["method"] = method;
+		out["result"] = mcp::variant_to_json(result);
+		return mcp::make_ok(out);
+	}
+	if (p_operation == "game_set_time_scale") {
+		double scale = CLAMP(double(p_payload.get("scale", 1.0)), 0.05, 4.0);
+		Engine::get_singleton()->set_time_scale(scale);
+		Dictionary out;
+		out["time_scale"] = Engine::get_singleton()->get_time_scale();
+		return mcp::make_ok(out);
+	}
+	if (p_operation == "debug_pause_game") {
+		bool paused = bool(p_payload.get("paused", true));
+		tree->set_pause(paused);
+		Dictionary out;
+		out["paused"] = tree->is_paused();
+		return mcp::make_ok(out);
+	}
+	if (p_operation == "debug_get_performance") {
+		Performance *performance = Performance::get_singleton();
+		if (!performance) {
+			return mcp::make_error("Performance monitor is unavailable.", "unavailable");
+		}
+		Dictionary metrics;
+		for (int monitor = 0; monitor < Performance::MONITOR_MAX; monitor++) {
+			Performance::Monitor type = (Performance::Monitor)monitor;
+			String name = performance->get_monitor_name(type);
+			if (!name.is_empty()) {
+				metrics[name] = performance->get_monitor(type);
+			}
+		}
+		Dictionary out;
+		out["timestamp_msec"] = (int64_t)OS::get_singleton()->get_ticks_msec();
+		out["metrics"] = metrics;
+		return mcp::make_ok(out);
+	}
+	if (p_operation == "physics_raycast") {
+		return mcp::make_error("This engine branch does not provide a safe deferred physics-query path through the debugger bridge.", "physics_query_unavailable");
+	}
+	if (p_operation == "navigation_get_path") {
+		Vector3 from;
+		Vector3 to;
+		if (!mcp::parse_vector3(p_payload.get("from", Variant()), from) || !mcp::parse_vector3(p_payload.get("to", Variant()), to)) {
+			return mcp::make_error("Parameters 'from' and 'to' must be Vector3 values.", "invalid_argument");
+		}
+		TypedArray<RID> maps = NavigationServer3D::get_singleton()->get_maps();
+		if (maps.is_empty()) {
+			return mcp::make_error("No runtime navigation maps are registered.", "no_navigation_map");
+		}
+		NavigationServer3D *navigation = NavigationServer3D::get_singleton();
+		RID map;
+		for (int i = 0; i < maps.size(); i++) {
+			RID candidate = maps[i];
+			if (navigation->map_is_active(candidate)) {
+				map = candidate;
+				break;
+			}
+		}
+		if (!map.is_valid()) return mcp::make_error("No active runtime navigation map is available.", "no_navigation_map");
+		Vector<Vector3> path = navigation->map_get_path(map, from, to, true, uint32_t(p_payload.get("navigation_layers", 1)));
+		Array points;
+		for (const Vector3 &point : path) {
+			points.push_back(mcp::variant_to_json(point));
+		}
+		Dictionary out;
+		out["point_count"] = points.size();
+		out["points"] = points;
+		return mcp::make_ok(out);
+	}
+	if (p_operation == "game_wait_for_condition") {
+		String path = String(p_payload.get("node_path", "."));
+		Node *node = _resolve_runtime_node(tree, path);
+		String property = String(p_payload.get("property", ""));
+		if (!node || property.is_empty() || !p_payload.has("equals")) {
+			return mcp::make_error("Provide an existing runtime node_path, property, and equals value.", "invalid_argument");
+		}
+		Dictionary props = _runtime_properties(node, property);
+		if (!props.has(property)) return mcp::make_error(vformat("Runtime property '%s' was not found or is not inspectable.", property), "property_not_found");
+		Dictionary out;
+		out["condition_met"] = node->get(property) == p_payload["equals"];
+		out["value"] = mcp::variant_to_json(node->get(property));
+		return mcp::make_ok(out);
+	}
+	if (p_operation == "game_get_events") {
+		MCPRuntimeInputDriver *driver = MCPRuntimeInputDriver::get_or_create();
+		if (!driver) return mcp::make_error("Runtime event collector could not initialize.", "unavailable");
+		Array events;
+		int64_t since_id = int64_t(p_payload.get("since_id", 0));
+		int limit = CLAMP(int(p_payload.get("limit", 100)), 1, 500);
+		Array all = driver->get_runtime_events();
+		for (int i = 0; i < all.size(); i++) {
+			Dictionary event = all[i];
+			if (int64_t(event.get("id", 0)) > since_id) events.push_back(event);
+			if (events.size() >= limit) break;
+		}
+		Dictionary out;
+		out["count"] = events.size();
+		out["events"] = events;
+		Array kinds;
+		kinds.push_back("scene_changed");
+		kinds.push_back("nodes_added");
+		kinds.push_back("nodes_removed");
+		out["event_kinds"] = kinds;
+		out["note"] = "Global scene-tree sampling reports scene switches and node-count deltas; it cannot identify specific door/death events unless the game exposes them as MCP events.";
+		return mcp::make_ok(out);
+	}
+	if (p_operation == "debug_get_stacktrace") {
+		Dictionary out;
+		out["available"] = false;
+		out["stack"] = Array();
+		out["note"] = "Use debug_get_runtime_errors for captured error stack traces.";
+		return mcp::make_ok(out);
+	}
+	if (p_operation == "debug_step_frame") {
+		return mcp::make_error("Frame stepping is controlled by the editor debugger, not by the paused game runtime bridge.", "editor_debugger_required");
+	}
+	return mcp::make_error(vformat("Unsupported runtime operation '%s'.", p_operation), "unsupported_operation");
+}
+
+} // namespace
+
+Error MCPRuntimeBridge::_handle_runtime_request(const Array &p_args) {
+	int64_t request_id = p_args.size() > 0 ? int64_t(p_args[0]) : 0;
+	String operation = p_args.size() > 1 ? String(p_args[1]) : String();
+	String payload_text = p_args.size() > 2 ? String(p_args[2]) : String("{}");
+	Dictionary result;
+	Ref<JSON> parser;
+	parser.instantiate();
+	if (parser->parse(payload_text) != OK || parser->get_data().get_type() != Variant::DICTIONARY) {
+		result = mcp::make_error("Malformed runtime request payload.", "invalid_payload");
+	} else {
+		result = _handle_runtime_operation(operation, parser->get_data());
+	}
+	Array response;
+	response.push_back(request_id);
+	response.push_back(bool(result.get("ok", false)));
+	response.push_back(result);
+	response.push_back(String(result.get("error", "")));
+	EngineDebugger::get_singleton()->send_message("mina_mcp:runtime_result", response);
+	return OK;
+}
+
 Error MCPRuntimeBridge::parse_message(void *p_user, const String &p_msg, const Array &p_args, bool &r_captured) {
 	r_captured = true;
 	if (p_msg == "capture_runtime") {
@@ -1072,6 +1425,9 @@ Error MCPRuntimeBridge::parse_message(void *p_user, const String &p_msg, const A
 	}
 	if (p_msg == "send_input") {
 		return _handle_send_input(p_args);
+	}
+	if (p_msg == "runtime_request") {
+		return _handle_runtime_request(p_args);
 	}
 	if (p_msg == "release_all") {
 		return _handle_release_all(p_args);

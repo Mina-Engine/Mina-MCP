@@ -69,6 +69,11 @@ class MCPRuntimeInputDriver : public Node {
 	static MCPRuntimeInputDriver *singleton;
 
 	Vector<QueuedRequest> queue;
+	Array runtime_events;
+	uint64_t next_runtime_event_id = 1;
+	ObjectID last_scene_id;
+	int last_runtime_node_count = -1;
+	bool event_baseline_initialized = false;
 	HashSet<Key> held_keys;
 	HashSet<MouseButton> held_mouse_buttons;
 	HashSet<StringName> held_actions;
@@ -94,6 +99,7 @@ class MCPRuntimeInputDriver : public Node {
 	void _begin_step(QueuedRequest &p_req, InputStep &p_step, uint64_t p_now);
 	void _finish_step(InputStep &p_step);
 	void _tick_queue();
+	void _sample_runtime_events();
 	void _send_ack(int64_t p_request_id, bool p_ok, int p_executed_steps, const String &p_error = String());
 
 	static Key _parse_key_name(const String &p_name);
@@ -111,6 +117,7 @@ public:
 	static MCPRuntimeInputDriver *get_singleton() { return singleton; }
 
 	void enqueue_command(int64_t p_request_id, const Dictionary &p_payload, bool p_ack_on_complete);
+	Array get_runtime_events() const { return runtime_events.duplicate(true); }
 	void release_all_inputs(bool p_cancel_queue = true);
 
 	MCPRuntimeInputDriver();
@@ -123,6 +130,7 @@ class MCPRuntimeBridge {
 	static Error _handle_capture_runtime(const Array &p_args);
 	static Error _handle_send_input(const Array &p_args);
 	static Error _handle_release_all(const Array &p_args);
+	static Error _handle_runtime_request(const Array &p_args);
 
 public:
 	static void initialize();

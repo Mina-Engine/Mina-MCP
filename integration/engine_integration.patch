@@ -92,10 +92,10 @@ index d44a043..dea18a9 100644
  		expand_all_button->set_disabled(false);
  		collapse_all_button->set_disabled(false);
 diff --git a/editor/settings/editor_settings.cpp b/editor/settings/editor_settings.cpp
-index 8dc98d6..c697c98 100644
+index 8dc98d6..c8e5690 100644
 --- a/editor/settings/editor_settings.cpp
 +++ b/editor/settings/editor_settings.cpp
-@@ -1150,6 +1150,12 @@ void EditorSettings::_load_defaults(Ref<ConfigFile> p_extra_config) {
+@@ -1150,6 +1150,13 @@ void EditorSettings::_load_defaults(Ref<ConfigFile> p_extra_config) {
  	EDITOR_SETTING_BASIC(Variant::BOOL, PROPERTY_HINT_NONE, "network/language_server/use_thread", false, String());
  	EDITOR_SETTING(Variant::INT, PROPERTY_HINT_NONE, "network/language_server/poll_limit_usec", 100000, "");
  
@@ -104,6 +104,7 @@ index 8dc98d6..c697c98 100644
 +	EDITOR_SETTING_BASIC(Variant::STRING, PROPERTY_HINT_NONE, "network/mcp_server/host", "127.0.0.1", String());
 +	EDITOR_SETTING_BASIC(Variant::INT, PROPERTY_HINT_RANGE, "network/mcp_server/port", 6800, "1024,65535,1");
 +	EDITOR_SETTING(Variant::BOOL, PROPERTY_HINT_NONE, "network/mcp_server/allow_remote", false, String());
++	EDITOR_SETTING_BASIC(Variant::STRING, PROPERTY_HINT_NONE, "network/mcp_server/enabled_categories", "", String());
 +
  	/* Debugger/profiler */
  
