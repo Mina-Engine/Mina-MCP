@@ -19,12 +19,14 @@ class EditorDock;
 class ItemList;
 class Label;
 class LineEdit;
+class MCPRuntimeDebuggerPlugin;
 class RichTextLabel;
 class SpinBox;
 
 class MCPEditorPlugin : public EditorPlugin {
 	GDCLASS(MCPEditorPlugin, EditorPlugin);
 
+	Ref<MCPRuntimeDebuggerPlugin> runtime_debugger_plugin;
 	EditorDock *dock = nullptr;
 	Label *status_label = nullptr;
 	Label *error_label = nullptr;

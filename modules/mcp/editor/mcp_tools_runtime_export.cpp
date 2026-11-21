@@ -12,6 +12,7 @@
 
 #include "../mcp_server.h"
 #include "../mcp_variant_codec.h"
+#include "mcp_runtime_debugger_plugin.h"
 #include "core/config/project_settings.h"
 #include "core/crypto/crypto_core.h"
 #include "core/io/dir_access.h"
@@ -82,10 +83,61 @@ Dictionary _tool_game_stop(const Dictionary &p_args) {
 	if (!_require_editor_runtime(err)) {
 		return err;
 	}
+	if (MCPRuntimeDebuggerPlugin::get_singleton()) {
+		MCPRuntimeDebuggerPlugin::get_singleton()->send_release_all();
+	}
 	EditorInterface::get_singleton()->stop_playing_scene();
 	Dictionary out;
 	out["is_playing"] = EditorInterface::get_singleton()->is_playing_scene();
 	return mcp::make_ok(out);
+}
+
+Dictionary _tool_game_capture_runtime(const Dictionary &p_args) {
+	Dictionary err;
+	if (!_require_editor_runtime(err)) {
+		return err;
+	}
+	MCPRuntimeDebuggerPlugin *plugin = MCPRuntimeDebuggerPlugin::get_singleton();
+	if (!plugin) {
+		return mcp::make_error("MCPRuntimeDebuggerPlugin is not active.", "unavailable");
+	}
+	int max_width = CLAMP(int(p_args.get("max_width", 1024)), 128, 2560);
+	String save_path = String(p_args.get("save_path", "")).strip_edges();
+	int timeout_ms = CLAMP(int(p_args.get("timeout_ms", 5000)), 500, 30000);
+	return plugin->request_capture_runtime(max_width, save_path, timeout_ms);
+}
+
+static double _estimate_input_duration_sec(const Dictionary &p_payload) {
+	double total = 0.0;
+	if (p_payload.has("steps") && p_payload["steps"].get_type() == Variant::ARRAY) {
+		Array steps = p_payload["steps"];
+		for (int i = 0; i < steps.size(); i++) {
+			if (steps[i].get_type() == Variant::DICTIONARY) {
+				Dictionary s = steps[i];
+				double d = double(s.get("duration", 0.0));
+				total += (d > 0.0) ? d : 0.1;
+			}
+		}
+	} else {
+		double d = double(p_payload.get("duration", 0.0));
+		total = (d > 0.0) ? d : 0.1;
+	}
+	return total;
+}
+
+Dictionary _tool_game_send_input(const Dictionary &p_args) {
+	Dictionary err;
+	if (!_require_editor_runtime(err)) {
+		return err;
+	}
+	MCPRuntimeDebuggerPlugin *plugin = MCPRuntimeDebuggerPlugin::get_singleton();
+	if (!plugin) {
+		return mcp::make_error("MCPRuntimeDebuggerPlugin is not active.", "unavailable");
+	}
+	bool wait_complete = bool(p_args.get("wait_for_completion", true));
+	int default_timeout = int(_estimate_input_duration_sec(p_args) * 1000.0) + 5000;
+	int timeout_ms = p_args.has("timeout_ms") ? int(p_args["timeout_ms"]) : default_timeout;
+	return plugin->request_send_input(p_args, wait_complete, timeout_ms);
 }
 
 Dictionary _tool_game_get_status(const Dictionary &p_args) {
@@ -494,6 +546,78 @@ void mcp_register_runtime_export_tools(MinaMCPServer *p_server) {
 		t.category = "runtime";
 		t.input_schema = make_tool_schema(Dictionary());
 		t.handler = _tool_game_get_status;
+		p_server->register_tool(t);
+	}
+	{
+		Dictionary props;
+		props["max_width"] = schema_int("Maximum PNG width in pixels (default: 1024, range: 128..2560).");
+		props["save_path"] = schema_string("Optional res:// PNG path to also save the screenshot on disk.");
+		props["timeout_ms"] = schema_int("Timeout in milliseconds waiting for the running game frame (default: 5000).");
+
+		MinaMCPServer::ToolDefinition t;
+		t.name = "game_capture_runtime";
+		t.title = "Capture Running Game Screenshot";
+		t.description = "Capture the live rendered screen of the currently running game process and return a PNG image directly to the AI.";
+		t.category = "runtime";
+		t.input_schema = make_tool_schema(props);
+		t.handler = _tool_game_capture_runtime;
+		p_server->register_tool(t);
+	}
+	{
+		Dictionary props;
+		Array types;
+		types.push_back("key");
+		types.push_back("action");
+		types.push_back("mouse_move");
+		types.push_back("mouse_button");
+		types.push_back("mouse_scroll");
+		types.push_back("gamepad_button");
+		types.push_back("gamepad_axis");
+		types.push_back("wait");
+		types.push_back("release_all");
+		props["type"] = schema_string("Single input operation type (omit if using 'steps' sequence).", types);
+		props["steps"] = schema_array("Ordered sequence of input step objects executed strictly in order (each step uses the same fields: type, key/keys, mode, duration, relative, position, button, direction, axis/stick, etc.).", schema_object("Input step"));
+		props["key"] = schema_string("Single key name, e.g. 'W', 'A', 'S', 'D', 'Space', 'E', 'Shift', 'Ctrl', 'Escape', 'Enter'.");
+		props["keys"] = schema_array("Multiple keys pressed simultaneously (chord), e.g. ['W', 'Shift'].", schema_string("Key name"));
+		props["action"] = schema_string("Godot InputMap action name when type='action', e.g. 'move_forward', 'interact'.");
+		props["strength"] = schema_number("InputMap action strength (default: 1.0).");
+		Array modes;
+		modes.push_back("tap");
+		modes.push_back("hold");
+		modes.push_back("press");
+		modes.push_back("release");
+		modes.push_back("click");
+		modes.push_back("double_click");
+		props["mode"] = schema_string("Press mode: 'tap'/'click' (brief press & release), 'hold' (press for duration sec then reliably release), 'press' (keep held), 'release', 'double_click'.", modes);
+		props["duration"] = schema_number("Duration in seconds for 'hold', 'tap', 'wait', smooth 'mouse_move', or timed 'gamepad_axis' (auto-resets to 0.0 when done).");
+		props["relative"] = schema_any("Relative mouse movement [dx, dy] for 3D camera look / FPS rotation.");
+		props["position"] = schema_any("Absolute mouse cursor position [x, y] inside the game viewport.");
+		props["move_steps"] = schema_int("Number of frames to distribute mouse_move across for smooth camera motion (default: 1).");
+		props["button"] = schema_string("Mouse button ('left', 'right', 'middle') or gamepad button ('a', 'b', 'x', 'y', 'lb', 'rb', 'start', 'back', 'dpad_up', 'dpad_down', 'dpad_left', 'dpad_right', 'l3', 'r3').");
+		Array dirs;
+		dirs.push_back("up");
+		dirs.push_back("down");
+		dirs.push_back("left");
+		dirs.push_back("right");
+		props["direction"] = schema_string("Mouse wheel scroll direction when type='mouse_scroll'.", dirs);
+		props["scroll_steps"] = schema_int("Number of mouse wheel scroll ticks (default: 1).");
+		props["factor"] = schema_number("Mouse wheel scroll factor (default: 1.0).");
+		props["axis"] = schema_string("Gamepad axis: 'left_x', 'left_y', 'right_x', 'right_y', 'trigger_left', 'trigger_right'.");
+		props["value"] = schema_number("Gamepad axis value (-1.0 to 1.0, or 0.0 to 1.0 for triggers).");
+		props["stick"] = schema_string("Shorthand for 2-axis gamepad stick ('left' or 'right') with 'x' and 'y'.");
+		props["x"] = schema_number("Stick X axis value (-1.0 to 1.0) when using 'stick'.");
+		props["y"] = schema_number("Stick Y axis value (-1.0 to 1.0) when using 'stick'.");
+		props["device"] = schema_int("Gamepad device index (default: 0).");
+		props["wait_for_completion"] = schema_bool("Wait until the input/hold/sequence finishes before returning (default: true).");
+		props["timeout_ms"] = schema_int("Optional timeout in milliseconds (auto-calculated from duration if omitted).");
+
+		MinaMCPServer::ToolDefinition t;
+		t.name = "game_send_input";
+		t.title = "Send Input to Running Game";
+		t.description = "Send keyboard, simultaneous chord keys, InputMap actions, mouse relative/absolute motion, mouse clicks, wheel scroll, gamepad buttons/sticks, timed holds, ordered sequences, or release_all directly to the target running game process via Godot's Input API (never global OS input).";
+		t.category = "runtime";
+		t.input_schema = make_tool_schema(props);
+		t.handler = _tool_game_send_input;
 		p_server->register_tool(t);
 	}
 	{

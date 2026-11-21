@@ -11,6 +11,7 @@
 #include "mcp_editor_plugin.h"
 
 #include "../mcp_server.h"
+#include "mcp_runtime_debugger_plugin.h"
 #include "core/object/callable_mp.h"
 #include "core/os/os.h"
 #include "editor/docks/editor_dock.h"
@@ -399,6 +400,8 @@ void MCPEditorPlugin::_on_tool_executed(const String &p_tool_name, bool p_ok, co
 void MCPEditorPlugin::_notification(int p_what) {
 	switch (p_what) {
 		case NOTIFICATION_ENTER_TREE: {
+			runtime_debugger_plugin.instantiate();
+			add_debugger_plugin(runtime_debugger_plugin);
 			MinaMCPServer *server = MinaMCPServer::get_singleton();
 			if (server) {
 				server->connect(SNAME("status_changed"), callable_mp(this, &MCPEditorPlugin::_on_server_status_changed));
@@ -410,6 +413,11 @@ void MCPEditorPlugin::_notification(int p_what) {
 		} break;
 
 		case NOTIFICATION_EXIT_TREE: {
+			if (runtime_debugger_plugin.is_valid()) {
+				runtime_debugger_plugin->send_release_all();
+				remove_debugger_plugin(runtime_debugger_plugin);
+				runtime_debugger_plugin.unref();
+			}
 			MinaMCPServer *server = MinaMCPServer::get_singleton();
 			if (server) {
 				if (server->is_connected(SNAME("status_changed"), callable_mp(this, &MCPEditorPlugin::_on_server_status_changed))) {
