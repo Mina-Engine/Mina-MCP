@@ -12,10 +12,15 @@
 
 #include "../mcp_server.h"
 #include "../mcp_variant_codec.h"
+#include "core/config/project_settings.h"
+#include "core/io/dir_access.h"
+#include "core/io/file_access.h"
 #include "core/io/resource_loader.h"
+#include "core/io/resource_saver.h"
 #include "core/object/class_db.h"
 #include "editor/editor_interface.h"
 #include "editor/editor_undo_redo_manager.h"
+#include "editor/file_system/editor_file_system.h"
 #include "scene/2d/light_2d.h"
 #include "scene/3d/light_3d.h"
 #include "scene/3d/skeleton_3d.h"
@@ -26,7 +31,10 @@
 #include "scene/animation/animation_tree.h"
 #include "scene/resources/animation.h"
 #include "scene/resources/animation_library.h"
+#include "scene/resources/bone_map.h"
 #include "scene/resources/environment.h"
+#include "scene/resources/packed_scene.h"
+#include "scene/resources/skeleton_profile.h"
 #include "scene/resources/sky.h"
 #include "scene/resources/3d/sky_material.h"
 
@@ -1105,6 +1113,213 @@ Dictionary _tool_animation_setup_state_machine(const Dictionary &p_args) {
 	return mcp::make_ok(out);
 }
 
+AnimationPlayer *_find_anim_player_recursive(Node *p_node) {
+	if (!p_node) {
+		return nullptr;
+	}
+	if (AnimationPlayer *ap = Object::cast_to<AnimationPlayer>(p_node)) {
+		return ap;
+	}
+	for (int i = 0; i < p_node->get_child_count(); i++) {
+		if (AnimationPlayer *found = _find_anim_player_recursive(p_node->get_child(i))) {
+			return found;
+		}
+	}
+	return nullptr;
+}
+
+String _ensure_mixamo_bone_map(const String &p_dest_dir, const String &p_prefix) {
+	String bm_path = p_dest_dir + "/mixamo_bone_map.tres";
+	Ref<SkeletonProfileHumanoid> profile;
+	profile.instantiate();
+	Ref<BoneMap> bm;
+	bm.instantiate();
+	bm->set_profile(profile);
+
+	struct Pair {
+		const char *profile_bone;
+		const char *mixamo_bone;
+	};
+	static const Pair MAPPINGS[] = {
+		{ "Hips", "Hips" },
+		{ "Spine", "Spine" },
+		{ "Chest", "Spine1" },
+		{ "UpperChest", "Spine2" },
+		{ "Neck", "Neck" },
+		{ "Head", "Head" },
+		{ "LeftShoulder", "LeftShoulder" },
+		{ "LeftUpperArm", "LeftArm" },
+		{ "LeftLowerArm", "LeftForeArm" },
+		{ "LeftHand", "LeftHand" },
+		{ "RightShoulder", "RightShoulder" },
+		{ "RightUpperArm", "RightArm" },
+		{ "RightLowerArm", "RightForeArm" },
+		{ "RightHand", "RightHand" },
+		{ "LeftUpperLeg", "LeftUpLeg" },
+		{ "LeftLowerLeg", "LeftLeg" },
+		{ "LeftFoot", "LeftFoot" },
+		{ "LeftToes", "LeftToeBase" },
+		{ "RightUpperLeg", "RightUpLeg" },
+		{ "RightLowerLeg", "RightLeg" },
+		{ "RightFoot", "RightFoot" },
+		{ "RightToes", "RightToeBase" },
+	};
+	for (const Pair &m : MAPPINGS) {
+		bm->set_skeleton_bone_name(StringName(m.profile_bone), StringName(p_prefix + String(m.mixamo_bone)));
+	}
+	DirAccess::make_dir_recursive_absolute(ProjectSettings::get_singleton()->globalize_path(p_dest_dir));
+	ResourceSaver::save(bm, bm_path);
+	return bm_path;
+}
+
+bool _should_auto_loop(const String &p_anim_name) {
+	String l = p_anim_name.to_lower();
+	return l.contains("idle") || l.contains("walk") || l.contains("run") || l.contains("strafe") || l.contains("aim") || l.contains("crouch") || l.contains("loop");
+}
+
+Dictionary _tool_animation_import_mixamo(const Dictionary &p_args) {
+	if (!EditorInterface::get_singleton() || !EditorFileSystem::get_singleton()) {
+		return mcp::make_error("Editor is required to import Mixamo animations.", "editor_required");
+	}
+	String dest_dir = mcp::normalize_res_path(String(p_args.get("dest_dir", "res://assets/animations/mixamo")));
+	if (!mcp::is_safe_res_path(dest_dir)) {
+		return mcp::make_error("Parameter 'dest_dir' must be a safe res:// directory.", "invalid_argument");
+	}
+	if (dest_dir.ends_with("/")) {
+		dest_dir = dest_dir.substr(0, dest_dir.length() - 1);
+	}
+	String bone_prefix = String(p_args.get("bone_prefix", "mixamorig:"));
+	String target_player_path = String(p_args.get("target_player_path", "")).strip_edges();
+	String library_name = String(p_args.get("library_name", "mixamo")).strip_edges();
+
+	Vector<String> src_files;
+	auto add_source = [&](const String &p_raw) {
+		String raw = p_raw.strip_edges();
+		if (raw.is_empty()) {
+			return;
+		}
+		String abs = raw.begins_with("res://") ? ProjectSettings::get_singleton()->globalize_path(raw) : raw;
+		Ref<DirAccess> da = DirAccess::open(abs);
+		if (da.is_valid()) {
+			da->list_dir_begin();
+			String fn = da->get_next();
+			while (!fn.is_empty()) {
+				if (!da->current_is_dir()) {
+					String ext = fn.get_extension().to_lower();
+					if (ext == "fbx" || ext == "glb" || ext == "gltf") {
+						src_files.push_back(abs.path_join(fn));
+					}
+				}
+				fn = da->get_next();
+			}
+			da->list_dir_end();
+		} else if (FileAccess::exists(abs)) {
+			String ext = abs.get_extension().to_lower();
+			if (ext == "fbx" || ext == "glb" || ext == "gltf") {
+				src_files.push_back(abs);
+			}
+		}
+	};
+
+	if (p_args.has("source_path")) {
+		add_source(String(p_args["source_path"]));
+	}
+	if (p_args.has("source_paths") && p_args["source_paths"].get_type() == Variant::ARRAY) {
+		Array arr = p_args["source_paths"];
+		for (int i = 0; i < arr.size(); i++) {
+			add_source(String(arr[i]));
+		}
+	}
+
+	String bone_map_path = _ensure_mixamo_bone_map(dest_dir, bone_prefix);
+	String abs_dest = ProjectSettings::get_singleton()->globalize_path(dest_dir);
+	DirAccess::make_dir_recursive_absolute(abs_dest);
+
+	Array imported_paths;
+	Vector<String> to_reimport;
+	for (const String &abs_src : src_files) {
+		String fname = abs_src.get_file();
+		String res_dst = dest_dir + "/" + fname;
+		String abs_dst = ProjectSettings::get_singleton()->globalize_path(res_dst);
+		if (abs_src.simplify_path().to_lower() != abs_dst.simplify_path().to_lower()) {
+			PackedByteArray bytes = FileAccess::get_file_as_bytes(abs_src);
+			if (bytes.is_empty()) {
+				continue;
+			}
+			Ref<FileAccess> wf = FileAccess::open(res_dst, FileAccess::WRITE);
+			if (wf.is_valid()) {
+				wf->store_buffer(bytes);
+			}
+		}
+		imported_paths.push_back(res_dst);
+		to_reimport.push_back(res_dst);
+	}
+
+	EditorFileSystem::get_singleton()->scan();
+	if (!to_reimport.is_empty()) {
+		EditorFileSystem::get_singleton()->reimport_files(to_reimport);
+	}
+
+	Array merged_anims;
+	if (!target_player_path.is_empty()) {
+		String err;
+		AnimationPlayer *target_ap = _resolve_anim_player(target_player_path, err);
+		if (!target_ap) {
+			return mcp::make_error(err, "node_not_found");
+		}
+		Ref<AnimationLibrary> lib = _get_or_create_library(target_ap, library_name);
+
+		for (int i = 0; i < imported_paths.size(); i++) {
+			String res_p = String(imported_paths[i]);
+			if (!ResourceLoader::exists(res_p)) {
+				continue;
+			}
+			Ref<PackedScene> ps = ResourceLoader::load(res_p, "PackedScene");
+			if (ps.is_null()) {
+				continue;
+			}
+			Node *inst = ps->instantiate();
+			if (!inst) {
+				continue;
+			}
+			AnimationPlayer *src_ap = _find_anim_player_recursive(inst);
+			if (src_ap) {
+				LocalVector<StringName> anims;
+				src_ap->get_animation_list(&anims);
+				String file_stem = res_p.get_file().get_basename().to_lower().replace(" ", "_").replace("-", "_");
+				for (const StringName &an : anims) {
+					Ref<Animation> a = src_ap->get_animation(an);
+					if (a.is_null()) {
+						continue;
+					}
+					Ref<Animation> dup = a->duplicate(true);
+					String out_name = (anims.size() == 1 && (String(an) == "mixamo_com" || String(an) == "Take 001")) ? file_stem : String(an);
+					if (_should_auto_loop(out_name)) {
+						dup->set_loop_mode(Animation::LOOP_LINEAR);
+					}
+					StringName out_sn(out_name);
+					if (lib->has_animation(out_sn)) {
+						lib->remove_animation(out_sn);
+					}
+					lib->add_animation(out_sn, dup);
+					merged_anims.push_back(library_name.is_empty() ? out_name : (library_name + "/" + out_name));
+				}
+			}
+			memdelete(inst);
+		}
+		EditorInterface::get_singleton()->mark_scene_as_unsaved();
+	}
+
+	Dictionary out;
+	out["bone_map_path"] = bone_map_path;
+	out["dest_dir"] = dest_dir;
+	out["imported_files"] = imported_paths;
+	out["imported_count"] = imported_paths.size();
+	out["merged_animations"] = merged_anims;
+	out["mixamo_url"] = "https://www.mixamo.com/#/";
+	return mcp::make_ok(out);
+}
+
 } // namespace
 
 void mcp_register_animation_lighting_tools(MinaMCPServer *p_server) {
@@ -1418,6 +1633,24 @@ void mcp_register_animation_lighting_tools(MinaMCPServer *p_server) {
 		t.category = "animation";
 		t.input_schema = make_tool_schema(props, req);
 		t.handler = _tool_animation_setup_state_machine;
+		p_server->register_tool(t);
+	}
+	{
+		Dictionary props;
+		props["source_path"] = schema_string("Absolute path or res:// path to a Mixamo .fbx/.glb/.gltf file or folder containing downloaded Mixamo files.");
+		props["source_paths"] = schema_array("Optional array of Mixamo .fbx/.glb/.gltf file paths.", schema_string("Path"));
+		props["dest_dir"] = schema_string("Project res:// destination folder (default: 'res://assets/animations/mixamo').");
+		props["bone_prefix"] = schema_string("Mixamo skeleton bone prefix for BoneMap generation (default: 'mixamorig:').");
+		props["target_player_path"] = schema_string("Optional AnimationPlayer node path in the edited scene to automatically merge extracted animations into.");
+		props["library_name"] = schema_string("Target AnimationLibrary name when merging into target_player_path (default: 'mixamo').");
+
+		MinaMCPServer::ToolDefinition t;
+		t.name = "animation_import_mixamo";
+		t.title = "Import & Retarget Mixamo Animations";
+		t.description = "Generate a Godot SkeletonProfileHumanoid BoneMap for Mixamo, copy/reimport downloaded Mixamo .fbx/.glb files into the project, and optionally merge all animations (with auto-loop for idle/walk/run) into a target AnimationPlayer.";
+		t.category = "animation";
+		t.input_schema = make_tool_schema(props);
+		t.handler = _tool_animation_import_mixamo;
 		p_server->register_tool(t);
 	}
 }
