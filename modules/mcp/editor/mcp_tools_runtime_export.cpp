@@ -109,11 +109,12 @@ Dictionary _tool_debug_get_logs(const Dictionary &p_args) {
 		return mcp::make_error("MCP server is unavailable.", "unavailable");
 	}
 	String level = String(p_args.get("level", "all"));
+	String source = String(p_args.get("source", "all"));
 	uint64_t since_id = uint64_t(int64_t(p_args.get("since_id", 0)));
 	int limit = CLAMP(int(p_args.get("limit", 100)), 1, 1000);
 	String search = String(p_args.get("search", ""));
 
-	Array logs = server->get_logs(level, since_id, limit, search);
+	Array logs = server->get_logs(level, since_id, limit, search, source);
 	Dictionary out;
 	out["count"] = logs.size();
 	out["logs"] = logs;
@@ -122,7 +123,33 @@ Dictionary _tool_debug_get_logs(const Dictionary &p_args) {
 
 Dictionary _tool_debug_clear_logs(const Dictionary &p_args) {
 	if (MinaMCPServer::get_singleton()) {
-		MinaMCPServer::get_singleton()->clear_logs();
+		bool include_runtime = bool(p_args.get("include_runtime_errors", true));
+		MinaMCPServer::get_singleton()->clear_logs(include_runtime);
+	}
+	return mcp::make_ok();
+}
+
+Dictionary _tool_debug_get_runtime_errors(const Dictionary &p_args) {
+	MinaMCPServer *server = MinaMCPServer::get_singleton();
+	if (!server) {
+		return mcp::make_error("MCP server is unavailable.", "unavailable");
+	}
+	String level = String(p_args.get("level", "all"));
+	uint64_t since_id = uint64_t(int64_t(p_args.get("since_id", 0)));
+	int limit = CLAMP(int(p_args.get("limit", 100)), 1, 500);
+	String search = String(p_args.get("search", ""));
+
+	Array errors = server->get_runtime_errors(level, since_id, limit, search);
+	Dictionary out;
+	out["count"] = errors.size();
+	out["errors"] = errors;
+	out["debugger"] = server->get_debugger_state();
+	return mcp::make_ok(out);
+}
+
+Dictionary _tool_debug_clear_runtime_errors(const Dictionary &p_args) {
+	if (MinaMCPServer::get_singleton()) {
+		MinaMCPServer::get_singleton()->clear_runtime_errors();
 	}
 	return mcp::make_ok();
 }
@@ -477,27 +504,65 @@ void mcp_register_runtime_export_tools(MinaMCPServer *p_server) {
 		levels.push_back("warning");
 		levels.push_back("error");
 		props["level"] = schema_string("Filter log level (default: 'all').", levels);
+		Array sources;
+		sources.push_back("all");
+		sources.push_back("editor");
+		sources.push_back("game");
+		props["source"] = schema_string("Filter log source: 'all', 'editor', or 'game' (default: 'all').", sources);
 		props["since_id"] = schema_int("Only return logs with id > since_id (for incremental polling).");
 		props["limit"] = schema_int("Maximum log entries to return (default: 100, max: 1000).");
 		props["search"] = schema_string("Optional case-insensitive substring filter.");
 
 		MinaMCPServer::ToolDefinition t;
 		t.name = "debug_get_logs";
-		t.title = "Get Engine Logs & Errors";
-		t.description = "Read captured engine stdout logs, warnings, script errors, and C++ errors.";
+		t.title = "Get Engine & Game Logs";
+		t.description = "Read captured editor and running-game stdout logs, warnings, script errors, debugger breaks, and C++ errors.";
 		t.category = "debug";
 		t.input_schema = make_tool_schema(props);
 		t.handler = _tool_debug_get_logs;
 		p_server->register_tool(t);
 	}
 	{
+		Dictionary props;
+		props["include_runtime_errors"] = schema_bool("Also clear structured runtime errors buffer (default: true).");
+
 		MinaMCPServer::ToolDefinition t;
 		t.name = "debug_clear_logs";
 		t.title = "Clear Captured Logs";
-		t.description = "Clear the MCP server's captured engine log buffer.";
+		t.description = "Clear the MCP server's captured engine/game log buffer (and optionally runtime errors).";
+		t.category = "debug";
+		t.input_schema = make_tool_schema(props);
+		t.handler = _tool_debug_clear_logs;
+		p_server->register_tool(t);
+	}
+	{
+		Dictionary props;
+		Array levels;
+		levels.push_back("all");
+		levels.push_back("error");
+		levels.push_back("warning");
+		props["level"] = schema_string("Filter runtime error level (default: 'all').", levels);
+		props["since_id"] = schema_int("Only return runtime errors with id > since_id.");
+		props["limit"] = schema_int("Maximum runtime errors to return (default: 100, max: 500).");
+		props["search"] = schema_string("Optional case-insensitive substring filter on message or source_file.");
+
+		MinaMCPServer::ToolDefinition t;
+		t.name = "debug_get_runtime_errors";
+		t.title = "Get Running-Game Runtime Errors";
+		t.description = "Read structured runtime errors, warnings, debugger breaks, source file/line, and full stack traces from the running game process.";
+		t.category = "debug";
+		t.input_schema = make_tool_schema(props);
+		t.handler = _tool_debug_get_runtime_errors;
+		p_server->register_tool(t);
+	}
+	{
+		MinaMCPServer::ToolDefinition t;
+		t.name = "debug_clear_runtime_errors";
+		t.title = "Clear Runtime Errors";
+		t.description = "Clear the captured running-game runtime errors buffer.";
 		t.category = "debug";
 		t.input_schema = make_tool_schema(Dictionary());
-		t.handler = _tool_debug_clear_logs;
+		t.handler = _tool_debug_clear_runtime_errors;
 		p_server->register_tool(t);
 	}
 	{
@@ -597,5 +662,19 @@ void mcp_register_runtime_export_tools(MinaMCPServer *p_server) {
 		t.input_schema = make_tool_schema(props);
 		t.handler = _tool_export_project;
 		p_server->register_tool(t);
+	}
+
+	{
+		MinaMCPServer::ResourceDefinition r;
+		r.uri = "mina://debug/runtime_errors";
+		r.name = "Running-Game Runtime Errors";
+		r.description = "Captured runtime errors, warnings, debugger break state, and stack traces from the running game.";
+		r.mime_type = "application/json";
+		r.reader = []() -> Dictionary {
+			Dictionary args;
+			args["limit"] = 100;
+			return _tool_debug_get_runtime_errors(args);
+		};
+		p_server->register_resource(r);
 	}
 }

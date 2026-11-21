@@ -78,6 +78,20 @@ public:
 		String message;
 	};
 
+	struct RuntimeErrorEntry {
+		uint64_t id = 0;
+		uint64_t timestamp_msec = 0;
+		String game_time;
+		bool warning = false;
+		String kind; // "error", "warning", "break"
+		String message;
+		String error_condition;
+		String source_file;
+		int source_line = 0;
+		String source_func;
+		Array stack_trace;
+	};
+
 	struct ToolActivityEntry {
 		uint64_t id = 0;
 		uint64_t timestamp_msec = 0;
@@ -131,6 +145,14 @@ private:
 	bool log_handlers_installed = false;
 	PrintHandlerList print_handler;
 	ErrorHandlerList error_handler;
+
+	// Captured running-game runtime errors & debugger break state (thread-safe via log_mutex).
+	Vector<RuntimeErrorEntry> runtime_errors;
+	uint64_t next_runtime_error_id = 1;
+	static constexpr int MAX_RUNTIME_ERRORS = 500;
+	bool debugger_breaked = false;
+	String debugger_break_reason;
+	Array debugger_last_stack;
 
 	// Tool call activity log for UI visibility.
 	Vector<ToolActivityEntry> activity_entries;
@@ -221,11 +243,21 @@ public:
 	// Direct invocation (useful for internal tests or chaining).
 	Dictionary execute_tool_direct(const String &p_name, const Dictionary &p_arguments);
 
-	// Connection, log, and activity telemetry.
+	// Connection, log, runtime error, and activity telemetry.
 	Array get_sessions() const;
 	int get_session_count() const { return sessions.size(); }
-	Array get_logs(const String &p_level = "all", uint64_t p_since_id = 0, int p_limit = 200, const String &p_search = String()) const;
-	void clear_logs();
+	Array get_logs(const String &p_level = "all", uint64_t p_since_id = 0, int p_limit = 200, const String &p_search = String(), const String &p_source = "all") const;
+	void clear_logs(bool p_include_runtime_errors = false);
+
+	// Running-game debugger hooks (called by ScriptEditorDebugger).
+	void push_runtime_output(const String &p_text, bool p_is_error);
+	void push_runtime_error(const String &p_game_time, bool p_warning, const String &p_message, const String &p_error_condition, const String &p_source_file, int p_source_line, const String &p_source_func, const Array &p_stack_trace, const String &p_kind = String());
+	void update_debugger_break(bool p_breaked, const String &p_reason = String());
+	void update_debugger_stack(const Array &p_stack_frames);
+	Array get_runtime_errors(const String &p_level = "all", uint64_t p_since_id = 0, int p_limit = 100, const String &p_search = String()) const;
+	Dictionary get_debugger_state() const;
+	void clear_runtime_errors();
+
 	Array get_recent_activity(int p_limit = 50) const;
 	void clear_activity();
 	Dictionary get_status_dictionary() const;

@@ -1,4 +1,97 @@
-﻿diff --git a/editor/settings/editor_settings.cpp b/editor/settings/editor_settings.cpp
+﻿diff --git a/editor/debugger/script_editor_debugger.cpp b/editor/debugger/script_editor_debugger.cpp
+index d44a043..dea18a9 100644
+--- a/editor/debugger/script_editor_debugger.cpp
++++ b/editor/debugger/script_editor_debugger.cpp
+@@ -59,6 +59,10 @@
+ #include "editor/settings/editor_settings.h"
+ #include "editor/themes/editor_scale.h"
+ #include "main/performance.h"
++#include "modules/modules_enabled.gen.h"
++#ifdef MODULE_MCP_ENABLED
++#include "modules/mcp/mcp_server.h"
++#endif
+ #include "scene/3d/camera_3d.h"
+ #include "scene/debugger/scene_debugger_object.h"
+ #include "scene/gui/button.h"
+@@ -386,6 +390,11 @@ void ScriptEditorDebugger::_msg_debug_enter(uint64_t p_thread_id, const Array &p
+ 		profiler->set_enabled(false, false);
+ 		visual_profiler->set_enabled(false);
+ 	}
++#ifdef MODULE_MCP_ENABLED
++	if (MinaMCPServer::get_singleton()) {
++		MinaMCPServer::get_singleton()->update_debugger_break(true, td.error);
++	}
++#endif
+ 	_update_buttons_state();
+ }
+ 
+@@ -419,6 +428,11 @@ void ScriptEditorDebugger::_msg_debug_exit(uint64_t p_thread_id, const Array &p_
+ 			_set_reason_text(TTRC("Execution resumed."), MESSAGE_SUCCESS);
+ 			emit_signal(SNAME("breaked"), false, false, "", false);
+ 			_mute_audio_on_break(false);
++#ifdef MODULE_MCP_ENABLED
++			if (MinaMCPServer::get_singleton()) {
++				MinaMCPServer::get_singleton()->update_debugger_break(false);
++			}
++#endif
+ 
+ 			_update_buttons_state();
+ 		} else {
+@@ -545,6 +559,11 @@ void ScriptEditorDebugger::_msg_stack_dump(uint64_t p_thread_id, const Array &p_
+ 		}
+ 	}
+ 	emit_signal(SNAME("stack_dump"), stack_dump_info);
++#ifdef MODULE_MCP_ENABLED
++	if (MinaMCPServer::get_singleton()) {
++		MinaMCPServer::get_singleton()->update_debugger_stack(stack_dump_info);
++	}
++#endif
+ }
+ 
+ void ScriptEditorDebugger::_msg_stack_frame_vars(uint64_t p_thread_id, const Array &p_data) {
+@@ -589,6 +608,11 @@ void ScriptEditorDebugger::_msg_output(uint64_t p_thread_id, const Array &p_data
+ 		}
+ 		EditorNode::get_log()->add_message(output_strings[i], msg_type);
+ 		emit_signal(SceneStringName(output), output_strings[i], msg_type);
++#ifdef MODULE_MCP_ENABLED
++		if (MinaMCPServer::get_singleton()) {
++			MinaMCPServer::get_singleton()->push_runtime_output(output_strings[i], msg_type == EditorLog::MSG_TYPE_ERROR);
++		}
++#endif
+ 	}
+ }
+ 
+@@ -764,6 +788,29 @@ void ScriptEditorDebugger::_msg_error(uint64_t p_thread_id, const Array &p_data)
+ 	error->set_tooltip_text(0, tooltip);
+ 	error->set_tooltip_text(1, tooltip);
+ 
++#ifdef MODULE_MCP_ENABLED
++	if (MinaMCPServer::get_singleton()) {
++		Array mcp_stack;
++		for (unsigned int i = 0; i < (unsigned int)oe.callstack.size(); i++) {
++			Dictionary frame;
++			frame["frame"] = (int)i;
++			frame["file"] = infos[i].file;
++			frame["function"] = infos[i].func;
++			frame["line"] = infos[i].line;
++			mcp_stack.push_back(frame);
++		}
++		MinaMCPServer::get_singleton()->push_runtime_error(
++				time,
++				oe.warning,
++				oe.error_descr.is_empty() ? oe.error : oe.error_descr,
++				oe.error,
++				oe.source_file,
++				oe.source_line,
++				oe.source_func,
++				mcp_stack);
++	}
++#endif
++
+ 	if (warning_count == 0 && error_count == 0) {
+ 		expand_all_button->set_disabled(false);
+ 		collapse_all_button->set_disabled(false);
+diff --git a/editor/settings/editor_settings.cpp b/editor/settings/editor_settings.cpp
 index 8dc98d6..c697c98 100644
 --- a/editor/settings/editor_settings.cpp
 +++ b/editor/settings/editor_settings.cpp

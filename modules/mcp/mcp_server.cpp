@@ -1149,11 +1149,13 @@ Array MinaMCPServer::get_sessions() const {
 	return out;
 }
 
-Array MinaMCPServer::get_logs(const String &p_level, uint64_t p_since_id, int p_limit, const String &p_search) const {
+Array MinaMCPServer::get_logs(const String &p_level, uint64_t p_since_id, int p_limit, const String &p_search, const String &p_source) const {
 	MutexLock lock(log_mutex);
 	Array out;
 	String level_filter = p_level.strip_edges().to_lower();
 	bool filter_level = !level_filter.is_empty() && level_filter != "all";
+	String source_filter = p_source.strip_edges().to_lower();
+	bool filter_source = !source_filter.is_empty() && source_filter != "all";
 	String search_lower = p_search.strip_edges().to_lower();
 	int limit = CLAMP(p_limit, 1, 1000);
 
@@ -1166,6 +1168,15 @@ Array MinaMCPServer::get_logs(const String &p_level, uint64_t p_since_id, int p_
 		}
 		if (filter_level && e.level != level_filter) {
 			continue;
+		}
+		if (filter_source) {
+			bool is_game = (e.source == "game" || e.source == "game_error" || e.source == "game_break");
+			if (source_filter == "game" && !is_game) {
+				continue;
+			}
+			if (source_filter == "editor" && is_game) {
+				continue;
+			}
 		}
 		if (!search_lower.is_empty() && !e.message.to_lower().contains(search_lower) && !e.source.to_lower().contains(search_lower)) {
 			continue;
@@ -1186,9 +1197,150 @@ Array MinaMCPServer::get_logs(const String &p_level, uint64_t p_since_id, int p_
 	return out;
 }
 
-void MinaMCPServer::clear_logs() {
+void MinaMCPServer::clear_logs(bool p_include_runtime_errors) {
 	MutexLock lock(log_mutex);
 	log_entries.clear();
+	if (p_include_runtime_errors) {
+		runtime_errors.clear();
+	}
+}
+
+void MinaMCPServer::push_runtime_output(const String &p_text, bool p_is_error) {
+	String trimmed = p_text.strip_edges(false, true);
+	if (trimmed.is_empty()) {
+		return;
+	}
+	_push_log(p_is_error ? "error" : "info", "game", trimmed);
+}
+
+void MinaMCPServer::push_runtime_error(const String &p_game_time, bool p_warning, const String &p_message, const String &p_error_condition, const String &p_source_file, int p_source_line, const String &p_source_func, const Array &p_stack_trace, const String &p_kind) {
+	String kind = p_kind.is_empty() ? (p_warning ? String("warning") : String("error")) : p_kind;
+	String summary = p_message.is_empty() ? p_error_condition : p_message;
+
+	{
+		MutexLock lock(log_mutex);
+		RuntimeErrorEntry entry;
+		entry.id = next_runtime_error_id++;
+		entry.timestamp_msec = OS::get_singleton() ? OS::get_singleton()->get_ticks_msec() : 0;
+		entry.game_time = p_game_time;
+		entry.warning = p_warning;
+		entry.kind = kind;
+		entry.message = summary;
+		entry.error_condition = p_error_condition;
+		entry.source_file = p_source_file;
+		entry.source_line = p_source_line;
+		entry.source_func = p_source_func;
+		entry.stack_trace = p_stack_trace.duplicate(true);
+		runtime_errors.push_back(entry);
+		if (runtime_errors.size() > MAX_RUNTIME_ERRORS) {
+			runtime_errors.remove_at(0);
+		}
+	}
+
+	String loc = p_source_file.is_empty() ? String() : vformat(" [%s:%d]", p_source_file, p_source_line);
+	_push_log(p_warning ? "warning" : "error", kind == "break" ? "game_break" : "game_error", summary + loc);
+}
+
+void MinaMCPServer::update_debugger_break(bool p_breaked, const String &p_reason) {
+	bool should_record_error = false;
+	{
+		MutexLock lock(log_mutex);
+		debugger_breaked = p_breaked;
+		debugger_break_reason = p_breaked ? p_reason : String();
+		if (!p_breaked) {
+			debugger_last_stack.clear();
+		} else if (!p_reason.is_empty() && p_reason != "Breakpoint") {
+			should_record_error = true;
+		}
+	}
+	if (should_record_error) {
+		push_runtime_error(String(), false, p_reason, p_reason, String(), 0, String(), Array(), "break");
+	}
+}
+
+void MinaMCPServer::update_debugger_stack(const Array &p_stack_frames) {
+	MutexLock lock(log_mutex);
+	debugger_last_stack = p_stack_frames.duplicate(true);
+	// Attach stack trace to the most recent debugger-break entry if it had no stack yet.
+	if (!runtime_errors.is_empty()) {
+		RuntimeErrorEntry &last = runtime_errors.write[runtime_errors.size() - 1];
+		if (last.kind == "break" && last.stack_trace.is_empty() && !p_stack_frames.is_empty()) {
+			last.stack_trace = p_stack_frames.duplicate(true);
+			Dictionary top = p_stack_frames[0];
+			if (last.source_file.is_empty()) {
+				last.source_file = top.get("file", "");
+				last.source_line = int(top.get("line", 0));
+				last.source_func = top.get("function", "");
+			}
+		}
+	}
+}
+
+Array MinaMCPServer::get_runtime_errors(const String &p_level, uint64_t p_since_id, int p_limit, const String &p_search) const {
+	MutexLock lock(log_mutex);
+	Array out;
+	String level_filter = p_level.strip_edges().to_lower();
+	bool filter_level = !level_filter.is_empty() && level_filter != "all";
+	String search_lower = p_search.strip_edges().to_lower();
+	int limit = CLAMP(p_limit, 1, MAX_RUNTIME_ERRORS);
+
+	Vector<RuntimeErrorEntry> matched;
+	for (int i = runtime_errors.size() - 1; i >= 0 && matched.size() < limit; i--) {
+		const RuntimeErrorEntry &e = runtime_errors[i];
+		if (e.id <= p_since_id) {
+			break;
+		}
+		if (filter_level) {
+			if (level_filter == "warning" && !e.warning) {
+				continue;
+			}
+			if (level_filter == "error" && e.warning) {
+				continue;
+			}
+		}
+		if (!search_lower.is_empty() &&
+				!e.message.to_lower().contains(search_lower) &&
+				!e.error_condition.to_lower().contains(search_lower) &&
+				!e.source_file.to_lower().contains(search_lower)) {
+			continue;
+		}
+		matched.push_back(e);
+	}
+
+	for (int i = matched.size() - 1; i >= 0; i--) {
+		const RuntimeErrorEntry &e = matched[i];
+		Dictionary d;
+		d["id"] = (int64_t)e.id;
+		d["timestamp_msec"] = (int64_t)e.timestamp_msec;
+		d["game_time"] = e.game_time;
+		d["level"] = e.warning ? "warning" : "error";
+		d["kind"] = e.kind;
+		d["message"] = e.message;
+		if (!e.error_condition.is_empty() && e.error_condition != e.message) {
+			d["error_condition"] = e.error_condition;
+		}
+		d["source_file"] = e.source_file;
+		d["source_line"] = e.source_line;
+		d["source_func"] = e.source_func;
+		d["stack_trace"] = e.stack_trace.duplicate(true);
+		out.push_back(d);
+	}
+	return out;
+}
+
+Dictionary MinaMCPServer::get_debugger_state() const {
+	MutexLock lock(log_mutex);
+	Dictionary d;
+	d["is_breaked"] = debugger_breaked;
+	d["break_reason"] = debugger_break_reason;
+	d["current_stack"] = debugger_last_stack.duplicate(true);
+	d["runtime_error_count"] = runtime_errors.size();
+	return d;
+}
+
+void MinaMCPServer::clear_runtime_errors() {
+	MutexLock lock(log_mutex);
+	runtime_errors.clear();
 }
 
 void MinaMCPServer::_record_activity(const String &p_tool_name, bool p_ok, const String &p_summary, double p_duration_ms) {

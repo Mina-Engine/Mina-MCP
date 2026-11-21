@@ -76,14 +76,15 @@ url = "http://127.0.0.1:6800/mcp"
 - `mina://engine/status` — Engine version, mode, MCP status, open scenes, playback state
 - `mina://project/info` — Current project metadata, autoloads, input actions
 - `mina://scene/current` — Live edited scene node tree
-- `mina://logs/recent` — Recent captured stdout, warnings, and errors
+- `mina://logs/recent` — Recent captured editor and running-game stdout, warnings, and errors
+- `mina://debug/runtime_errors` — Structured running-game runtime errors, warnings, debugger breaks, and stack traces
 
-### Built-in Tools (72 core tools + extensible module tools)
+### Built-in Tools (74 core tools + extensible module tools)
 - **Engine & Project (10):** `engine_get_status`, `project_create`, `project_list`, `project_open`, `project_get_info`, `project_get_setting`, `project_set_setting`, `project_list_settings`, `project_configure_input_action`, `project_manage_autoload`
 - **Scene & Nodes & Editor (23):** `scene_list_open`, `scene_create`, `scene_open`, `scene_save`, `scene_close`, `scene_get_tree`, `scene_instantiate`, `node_create`, `node_delete`, `node_duplicate`, `node_reparent`, `node_rename`, `node_get_properties`, `node_set_properties`, `node_set_transform`, `node_manage_groups`, `node_connect_signal`, `node_disconnect_signal`, `node_list_signals`, `node_call_method`, `editor_select_nodes`, `editor_undo`, `editor_redo`
 - **Assets & Scripts (17):** `asset_list_files`, `asset_get_info`, `asset_create_resource`, `asset_inspect_resource`, `asset_update_resource`, `asset_create_directory`, `asset_move_file`, `asset_copy_file`, `asset_delete_file`, `asset_scan_filesystem`, `asset_reimport`, `script_read`, `script_write`, `script_patch`, `script_attach`, `script_validate`, `script_open_in_editor`
 - **Animation, Lighting & ClassDB Introspection (11):** `animation_list`, `animation_create`, `animation_delete`, `animation_add_track`, `animation_insert_key`, `animation_remove_key`, `animation_get_details`, `lighting_add_light`, `lighting_configure_environment`, `class_list`, `class_get_info`
-- **Runtime, Debugging & Export (11):** `game_play`, `game_stop`, `game_get_status`, `debug_get_logs`, `debug_clear_logs`, `debug_set_breakpoint`, `debug_capture_viewport` (returns PNG image content), `export_list_platforms`, `export_list_presets`, `export_create_preset`, `export_project`
+- **Runtime, Debugging & Export (13):** `game_play`, `game_stop`, `game_get_status`, `debug_get_logs`, `debug_clear_logs`, `debug_get_runtime_errors`, `debug_clear_runtime_errors`, `debug_set_breakpoint`, `debug_capture_viewport` (returns PNG image content), `export_list_platforms`, `export_list_presets`, `export_create_preset`, `export_project`
 - **Example Module Extension (`examples/horror_mcp_tools/`):** `horror_get_director_state`, `horror_set_director_state`, `horror_create_interactable`
 
 ---
